@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Custebo — ROS 2 &amp; Gazebo 3D World Editor</title>
+  <link rel="stylesheet" href="/css/studio.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <!-- ==================== TOP COMMAND BAR ==================== -->
+  <header class="topbar">
+    <div class="brand-group">
+      <div class="brand-badge">CUSTEBO</div>
+      <input id="world-name-input" class="world-name-input" type="text" value="custebo_world" title="Nombre del mundo (<world name='...'>)" />
+      <select id="sdf-target-select" class="toolbar-select" title="Versión objetivo de Gazebo / SDFormat">
+        <option value="harmonic">Gazebo Harmonic (SDF 1.10)</option>
+        <option value="classic">Gazebo Classic 11 (SDF 1.7)</option>
+      </select>
+    </div>
+
+    <!-- Undo / Redo & Gizmo Tools -->
+    <div class="tool-group">
+      <button id="btn-undo" class="tool-btn" title="Deshacer (Ctrl+Z)" disabled>↶ Undo</button>
+      <button id="btn-redo" class="tool-btn" title="Rehacer (Ctrl+Y)" disabled>↷ Redo</button>
+      <span class="divider"></span>
+      <button id="btn-mode-translate" class="tool-btn active" title="Trasladar (Atajo: G)">✥ Mover (G)</button>
+      <button id="btn-mode-rotate" class="tool-btn" title="Rotar (Atajo: R)">↻ Rotar (R)</button>
+      <button id="btn-mode-scale" class="tool-btn" title="Escalar (Atajo: S)">⤢ Escalar (S)</button>
+      <button id="btn-space-toggle" class="tool-btn" title="Alternar Coordenadas Globales (World) / Locales (Local) (Atajo: X)">🌐 World</button>
+      <button id="btn-drop-ground" class="tool-btn accent-subtle" title="Apoyar objeto sobre el suelo o mesa inferior (Atajo: Espacio)">⬇ Apoyar (Espacio)</button>
+      <button id="btn-snap-neighbor" class="tool-btn" title="Pegar esquina/cara contra el objeto vecino más cercano sin solapamiento">🧲 Imán Esquina</button>
+      <button id="btn-tool-ruler" class="tool-btn" title="Medidor y Regla Láser 3D: haz clic en 2 puntos del escenario">📏 Regla 3D</button>
+      <button id="btn-tool-floorplan" class="tool-btn" title="Floorplan Tracer: haz clic en el suelo para dibujar polilíneas y levantar muros 3D (Enter para terminar)">✏ Trazar Muros</button>
+    </div>
+
+    <!-- Snapping & Camera Modes -->
+    <div class="tool-group">
+      <label class="snap-label" title="Salto de rejilla en metros">
+        Grid:
+        <select id="grid-snap-select" class="toolbar-select compact">
+          <option value="0">Off</option>
+          <option value="1">1.0 m</option>
+          <option value="0.5">0.5 m</option>
+          <option value="0.1" selected>0.1 m</option>
+          <option value="0.01">0.01 m</option>
+        </select>
+      </label>
+      <label class="snap-label" title="Salto angular al rotar">
+        Ángulo:
+        <select id="angle-snap-select" class="toolbar-select compact">
+          <option value="0">Off</option>
+          <option value="5">5°</option>
+          <option value="15" selected>15°</option>
+          <option value="45">45°</option>
+          <option value="90">90°</option>
+        </select>
+      </label>
+      <span class="divider"></span>
+      <button id="btn-cam-view" class="tool-btn" title="Alternar Vista Perspectiva 3D / Ortográfica Cenital 2D (Numpad 7)">🎥 3D Persp</button>
+      <button id="btn-debug-col" class="tool-btn" title="Mostrar/Ocultar Cajas de Colisión">📦 Colisión</button>
+      <button id="btn-debug-inertia" class="tool-btn" title="Mostrar Centros de Masa y Elipsoides de Inercia (Magenta)">🟣 Inercia</button>
+      <button id="btn-debug-tf" class="tool-btn active" title="Mostrar Ejes TF Locales (+X Rojo, +Y Verde, +Z Azul)">🧭 TF</button>
+    </div>
+
+    <!-- Doctor Gazebo & Export Actions -->
+    <div class="action-group">
+      <button id="btn-doctor-badge" class="doctor-badge ok" title="Estado de validación física Doctor Gazebo">
+        ✓ Doctor Gazebo: OK
+      </button>
+      <button id="btn-toggle-xml" class="tool-btn active" title="Mostrar/Ocultar Vista Dividida de Código XML/SDF en Vivo">
+        &lt;/&gt; Live SDF
+      </button>
+      <button id="btn-save-proj" class="tool-btn" title="Guardar proyecto nativo (.gproj.json)">💾 Guardar</button>
+      <button id="btn-load-proj" class="tool-btn" title="Cargar proyecto (.gproj.json)">📂 Abrir</button>
+      <input id="file-load-input" type="file" accept=".json,.gproj" style="display:none" />
+      <button id="btn-import-sdf" class="tool-btn" title="Importar un archivo .sdf o .world existente y limpiar su basura dinámica">📥 Importar .SDF</button>
+      <input id="file-sdf-input" type="file" accept=".sdf,.world,.xml" style="display:none" />
+      <button id="btn-export-sdf" class="btn-primary" title="Exportar archivo .sdf limpio y validado">⬇ Exportar .SDF</button>
+      <button id="btn-play-gz" class="btn-success" title="Lanzar Gazebo Harmonic con el mundo actual">▶ Play Gazebo</button>
+    </div>
+  </header>
+
+  <!-- ==================== MAIN WORKSPACE ==================== -->
+  <main class="workspace">
+    <!-- LEFT PANEL: CREATION PALETTE & OUTLINER -->
+    <aside class="sidebar left-sidebar">
+      <section class="panel-section palette-section">
+        <div class="panel-header">
+          <span>➕ LIBRERÍA DE ELEMENTOS (Z-UP)</span>
+        </div>
+        <div class="palette-scroll">
+          <div class="palette-cat-title">🏗 Arquitectura y Estructura (Estáticos)</div>
+          <div class="create-grid">
+            <button class="create-btn" data-add-archetype="wall" title="Pared / Muro estirado estático">🧱 Pared / Muro</button>
+            <button class="create-btn" data-add-archetype="wall_doorway" title="Muro con hueco real de puerta">🚪 Muro c/ Puerta</button>
+            <button class="create-btn" data-add-archetype="wall_window" title="Muro con hueco de ventana">🪟 Muro c/ Ventana</button>
+            <button class="create-btn" data-add-archetype="wall_corner_l" title="Esquina de dos muros a 90°">📐 Esquina en L</button>
+            <button class="create-btn" data-add-archetype="column_square" title="Columna estructural cuadrada">🏛 Columna</button>
+            <button class="create-btn" data-add-archetype="stairs" title="Escalera paramétrica por peldaños">🪜 Escalera</button>
+            <button class="create-btn" data-add-archetype="ramp" title="Rampa inclinada para robots">📐 Rampa Robot</button>
+          </div>
+
+          <div class="palette-cat-title">🏭 Almacén, Mobiliario y Tráfico</div>
+          <div class="create-grid">
+            <button class="create-btn" data-add-archetype="warehouse_rack" title="Estantería industrial multi-balda">🗄 Estantería</button>
+            <button class="create-btn" data-add-archetype="table" title="Mesa con tablero y 4 patas">🪑 Mesa / Lab</button>
+            <button class="create-btn" data-add-archetype="euro_pallet" title="Palé europeo estándar 1.2x0.8m">🪵 Palé EUR</button>
+            <button class="create-btn" data-add-archetype="safety_fence" title="Valla / Barandilla de seguridad">🚧 Valla Seg.</button>
+            <button class="create-btn" data-add-archetype="jersey_barrier" title="Barrera vial de hormigón">🚧 Barrera Vial</button>
+            <button class="create-btn" data-add-archetype="traffic_cone" title="Cono de tráfico reflectante">🔺 Cono Tráfico</button>
+            <button class="create-btn" data-add-archetype="bollard" title="Bolardo / Poste delimitador">🛑 Bolardo</button>
+            <button class="create-btn" data-add-archetype="cardboard_box" title="Caja de cartón ligera dinámica">📦 Caja Cartón</button>
+          </div>
+
+          <div class="palette-cat-title">🔷 Primitivas Puras y Luces</div>
+          <div class="create-grid">
+            <button class="create-btn" data-add-shape="box">📦 Cubo (Box)</button>
+            <button class="create-btn" data-add-shape="cylinder">🛢 Cilindro</button>
+            <button class="create-btn" data-add-shape="sphere">🟠 Esfera</button>
+            <button class="create-btn" data-add-shape="ground_plane">⬛ Suelo</button>
+            <button class="create-btn" data-add-light="directional">☀ Luz Dir.</button>
+            <button class="create-btn" data-add-light="point">💡 Luz Puntual</button>
+            <button class="create-btn" data-add-light="spot">🔦 Foco (Spot)</button>
+          </div>
+
+          <!-- SECCIÓN DE OBJETOS PERSONALIZADOS DEL USUARIO -->
+          <div class="palette-cat-title custom-cat-header">
+            <span>📂 Objetos Personalizados</span>
+            <button id="btn-open-mesh-import" class="mini-btn" title="Subir archivo 3D (.stl, .obj, .dae, .glb) a Objetos Personalizados">➕ Importar 3D</button>
+          </div>
+
+          <!-- Asistente rápido de importación de Mallas CAD -->
+          <div id="mesh-import-drawer" class="import-drawer hidden">
+            <div class="insp-row">
+              <span class="insp-label">Unidades CAD:</span>
+              <select id="import-mesh-unit" class="insp-select">
+                <option value="m">Metros (m)</option>
+                <option value="mm">Milímetros → Metros (mm)</option>
+                <option value="cm">Centímetros → Metros (cm)</option>
+              </select>
+            </div>
+            <div class="insp-row">
+              <span class="insp-label">Eje Arriba:</span>
+              <select id="import-mesh-axis" class="insp-select">
+                <option value="Z_UP">Z-Up (ROS / Gazebo)</option>
+                <option value="Y_UP_TO_Z_UP">Y-Up → Z-Up (Blender/CAD)</option>
+              </select>
+            </div>
+            <button id="btn-pick-mesh-file" class="btn-primary" style="width:100%;">📂 Seleccionar .STL / .OBJ / .DAE / .GLB</button>
+            <input id="file-mesh-input" type="file" accept=".stl,.obj,.dae,.glb,.gltf" style="display:none" />
+          </div>
+
+          <div id="custom-objects-grid" class="custom-objects-grid custom-objects-list"></div>
+
+          <!-- HERRAMIENTAS CAD Y GENERACIÓN PROCEDURAL (FASE 3) -->
+          <div class="palette-cat-title custom-cat-header">
+            <span>⚡ Generación Procedural y CAD</span>
+            <button id="btn-toggle-procedural" class="mini-btn">Abrir</button>
+          </div>
+          <div id="procedural-drawer" class="import-drawer hidden">
+            <!-- 1. Grid Array Cloner -->
+            <div style="font-weight:700;color:#79b8ff;font-size:11px;">🔢 Matriz Lineal / Cuadrícula (del seleccionado)</div>
+            <div class="vec3-grid">
+              <div class="vec-field"><span class="vec-axis x">Nx</span><input id="arr-nx" type="number" min="1" max="15" value="3" /></div>
+              <div class="vec-field"><span class="vec-axis y">Ny</span><input id="arr-ny" type="number" min="1" max="15" value="2" /></div>
+              <div class="vec-field"><span class="vec-axis z">Δm</span><input id="arr-step" type="number" step="0.5" min="0.2" value="2.5" /></div>
+            </div>
+            <button id="btn-run-grid-array" class="tool-btn" style="width:100%;">🔢 Generar Matriz Nx × Ny</button>
+
+            <!-- 2. Spline / Path Cloner -->
+            <div style="font-weight:700;color:#79b8ff;font-size:11px;margin-top:4px;">〰 Clonador en Curva Bézier</div>
+            <div class="insp-row">
+              <span class="insp-label">Copias en curva:</span>
+              <input id="spline-count" class="insp-input" type="number" min="2" max="40" value="7" style="width:70px;" />
+              <button id="btn-run-spline" class="tool-btn">〰 Clonar</button>
+            </div>
+
+            <!-- 3. Scatter Brush (Domain Randomization) -->
+            <div style="font-weight:700;color:#79b8ff;font-size:11px;margin-top:4px;">🎨 Pincel de Dispersión (Scatter)</div>
+            <div class="vec3-grid">
+              <div class="vec-field"><span class="vec-axis x">N</span><input id="scat-count" type="number" min="1" max="50" value="10" title="Cantidad de objetos" /></div>
+              <div class="vec-field"><span class="vec-axis y">R</span><input id="scat-radius" type="number" step="1" min="1" value="6" title="Radio de dispersión (m)" /></div>
+              <div class="vec-field"><span class="vec-axis z">d</span><input id="scat-mindist" type="number" step="0.2" min="0.2" value="1.0" title="Distancia mínima anti-solapamiento (m)" /></div>
+            </div>
+            <button id="btn-run-scatter" class="tool-btn" style="width:100%;">🎨 Dispersar Aleatoriamente</button>
+
+            <!-- 4. Floorplan 2D Image & ROS PGM Map to 3D Walls -->
+            <div style="font-weight:700;color:#79b8ff;font-size:11px;margin-top:4px;">🗺 Plano 2D y Mapa SLAM (.PGM → Muros 3D)</div>
+            <div class="insp-row">
+              <span class="insp-label">Ancho Plano (m):</span>
+              <input id="floorplan-size-m" class="insp-input" type="number" step="1" min="2" value="20" style="width:70px;" />
+              <button id="btn-load-floorplan-img" class="tool-btn" title="Cargar imagen .png/.jpg de plano en el suelo Z=0">🖼 Plano 2D</button>
+              <input id="file-floorplan-input" type="file" accept="image/*" style="display:none" />
+            </div>
+            <button id="btn-import-pgm-walls" class="tool-btn" style="width:100%;" title="Importar un mapa map.pgm de ROS y levantar muros 3D automáticamente">🧱 Levantar Muros desde .PGM</button>
+            <input id="file-pgm-input" type="file" accept=".pgm" style="display:none" />
+
+            <!-- 5. Parametric Terrain & CAD Alignment -->
+            <div style="font-weight:700;color:#79b8ff;font-size:11px;margin-top:4px;">⛰ Terreno Heightmap y Alineación CAD</div>
+            <div class="insp-row">
+              <select id="terrain-profile-select" class="insp-select">
+                <option value="hills">Colinas Suaves</option>
+                <option value="crater">Cráter / Obstáculo</option>
+                <option value="ridge">Cresta Central</option>
+              </select>
+              <button id="btn-gen-terrain" class="tool-btn">⛰ Crear</button>
+            </div>
+            <div class="create-grid" style="margin-bottom:0;">
+              <button id="btn-distribute-x" class="tool-btn" title="Distribuir objetos uniformemente en X">↔ Distribuir X</button>
+              <button id="btn-distribute-y" class="tool-btn" title="Distribuir objetos uniformemente en Y">↕ Distribuir Y</button>
+            </div>
+          </div>
+
+          <!-- CONECTOR GAZEBO FUEL & WORKSPACE ROS 2 -->
+          <div class="palette-cat-title custom-cat-header">
+            <span>🌐 Gazebo Fuel y Workspace ROS 2</span>
+            <button id="btn-toggle-fuel" class="mini-btn">Buscar</button>
+          </div>
+          <div id="fuel-browser-drawer" class="import-drawer hidden">
+            <div class="insp-row">
+              <input id="fuel-search-input" class="insp-input" type="text" placeholder="Ej: shelf, table, cone, tree..." />
+              <button id="btn-fuel-search-go" class="mini-btn">🔍</button>
+            </div>
+            <div id="fuel-results-list" class="custom-objects-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel-section outliner-section">
+        <div class="panel-header">
+          <span>🌲 JERARQUÍA (OUTLINER)</span>
+          <div class="outliner-actions">
+            <button id="btn-dup-selected" class="icon-btn" title="Duplicar seleccionado (Ctrl+D)">⧉</button>
+            <button id="btn-del-selected" class="icon-btn danger" title="Borrar seleccionado (Supr)">🗑</button>
+          </div>
+        </div>
+        <div id="outliner-tree" class="outliner-tree"></div>
+      </section>
+
+      <!-- Doctor Gazebo Diagnostic Drawer -->
+      <section class="panel-section doctor-section">
+        <div class="panel-header">
+          <span>🩺 DIAGNÓSTICO DOCTOR GAZEBO</span>
+        </div>
+        <div id="doctor-alerts-list" class="doctor-alerts-list"></div>
+      </section>
+    </aside>
+
+    <!-- CENTER: 3D VIEWPORT (ENU Z-UP) -->
+    <section class="viewport-container" id="viewport-container">
+      <div id="canvas-mount" class="canvas-mount"></div>
+
+      <!-- Coordinate System Overlay Badge -->
+      <div class="viewport-hud-top">
+        <span class="enu-pill">ROS 2 ENU: <b>+X</b> Front (Rojo) · <b>+Y</b> Left (Verde) · <b>+Z</b> Up (Azul)</span>
+        <span id="hud-selection-info" class="selection-pill">Ningún objeto seleccionado</span>
+      </div>
+
+      <div class="viewport-hud-bottom">
+        <span><b>G</b> Mover · <b>R</b> Rotar · <b>S</b> Escalar · <b>Espacio</b> Drop Z=0 · <b>Ctrl+D</b> Duplicar · <b>Supr</b> Borrar · <b>7</b> Cenital 2D</span>
+        <span id="hud-status-msg">Listo</span>
+      </div>
+    </section>
+
+    <!-- OPTIONAL SPLIT-VIEW: LIVE SDF XML CODE PREVIEW -->
+    <section id="xml-split-panel" class="xml-split-panel">
+      <div class="panel-header">
+        <span>⚡ VISTA SDF EN TIEMPO REAL</span>
+        <div class="xml-actions">
+          <button id="btn-verify-sdf" class="mini-btn" title="Ejecutar validador CLI + gz sdf -k">✓ Verificar gz sdf</button>
+          <button id="btn-copy-sdf" class="mini-btn" title="Copiar XML al portapapeles">📋 Copiar</button>
+        </div>
+      </div>
+      <div id="xml-code-container" class="xml-code-container"></div>
+    </section>
+
+    <!-- RIGHT PANEL: PROPERTY & PHYSICS INSPECTOR -->
+    <aside class="sidebar right-sidebar">
+      <div class="panel-header">
+        <span>🔧 INSPECTOR DE PROPIEDADES</span>
+        <label class="unit-toggle" title="Mostrar ángulos en Grados o Radianes (internamente siempre se guarda en radianes)">
+          <input type="checkbox" id="chk-angles-deg" checked /> Grados (°)
+        </label>
+      </div>
+      <div id="inspector-content" class="inspector-content">
+        <div class="empty-inspector">
+          Selecciona un objeto en el Visor 3D o en el Outliner para inspeccionar su pose, geometría e inercia.
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,2300 @@
+/**
+ * Custebo 3D World Editor — Frontend Application (`frontend/js/main.js`).
+ *
+ * Layer 3 (Presentation & 3D Viewport):
+ * - Strictly ENU Z-Up (`THREE.Object3D.DEFAULT_UP.set(0, 0, 1)`)
+ * - Euler intrinsic ZYX (`new THREE.Euler(roll, pitch, yaw, 'ZYX')`) matching Gazebo <pose>
+ * - Zero direct state mutation: all actions emit Commands to `/api/command` (Undo/Redo)
+ */
+
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { TransformControls } from "three/addons/controls/TransformControls.js";
+import { STLLoader } from "three/addons/loaders/STLLoader.js";
+import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
+
+// Enforce ROS 2 / Gazebo ENU Z-Up globally before creating any Three.js objects
+THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
+
+const RAD2DEG = 180.0 / Math.PI;
+const DEG2RAD = Math.PI / 180.0;
+
+function rgbaToHex(rgba) {
+  if (!Array.isArray(rgba) || rgba.length < 3) return "#3b82f6";
+  const r = Math.min(255, Math.max(0, Math.round(rgba[0] * 255)));
+  const g = Math.min(255, Math.max(0, Math.round(rgba[1] * 255)));
+  const b = Math.min(255, Math.max(0, Math.round(rgba[2] * 255)));
+  return "#" + [r, g, b].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+function hexToRgba(hex) {
+  const clean = hex.replace("#", "");
+  const num = parseInt(clean, 16);
+  const r = ((num >> 16) & 255) / 255.0;
+  const g = ((num >> 8) & 255) / 255.0;
+  const b = (num & 255) / 255.0;
+  return [Number(r.toFixed(4)), Number(g.toFixed(4)), Number(b.toFixed(4)), 1.0];
+}
+
+class CusteboStudioApp {
+  constructor() {
+    this.sceneGraph = null;
+    this.historyState = { can_undo: false, can_redo: false };
+    this.sdfPreview = "";
+    this.sdfLineMap = {};
+    this.doctorAlerts = [];
+    this.customObjects = [];
+    this.presets = { materials: {}, surfaces: {} };
+    this.meshGeometryCache = new Map();
+    this.stlLoader = new STLLoader();
+    this.objLoader = new OBJLoader();
+
+    this.selectedNodeId = null;
+    this.showAnglesInDegrees = true;
+    this.cameraMode = "perspective"; // "perspective" | "ortho_top"
+    this.debugLayers = {
+      collision: false,
+      inertia: false,
+      tf: true,
+    };
+
+    // Map of node_id -> THREE.Group in the 3D scene
+    this.nodeObjectMap = new Map();
+    this.isDraggingGizmo = false;
+
+    this._initThreeViewport();
+    this._bindToolbarAndShortcuts();
+    this.fetchInitialState();
+  }
+
+  // ===========================================================================
+  // 1. THREE.JS ENU Z-UP VIEWPORT INITIALIZATION
+  // ===========================================================================
+  _initThreeViewport() {
+    this.mountEl = document.getElementById("canvas-mount");
+    const width = this.mountEl.clientWidth || 800;
+    const height = this.mountEl.clientHeight || 600;
+
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x0f1318);
+
+    // Perspective Camera (Z-Up)
+    this.perspCamera = new THREE.PerspectiveCamera(50, width / height, 0.05, 1000);
+    this.perspCamera.position.set(6.5, -6.5, 4.8);
+    this.perspCamera.up.set(0, 0, 1);
+
+    // Orthographic Top-Down Camera (Numpad 7)
+    const aspect = width / height;
+    const frustumSize = 16;
+    this.orthoCamera = new THREE.OrthographicCamera(
+      (-frustumSize * aspect) / 2,
+      (frustumSize * aspect) / 2,
+      frustumSize / 2,
+      -frustumSize / 2,
+      0.1,
+      500
+    );
+    this.orthoCamera.position.set(0, 0, 50);
+    this.orthoCamera.up.set(0, 1, 0); // In top-down view, +X right or +Y up
+
+    this.activeCamera = this.perspCamera;
+
+    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    this.renderer.setSize(width, height);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.mountEl.appendChild(this.renderer.domElement);
+
+    // Ambient + Hemisphere lighting for clear CAD visibility
+    const hemiLight = new THREE.HemisphereLight(0xdbeafe, 0x1e293b, 0.65);
+    hemiLight.position.set(0, 0, 30);
+    this.scene.add(hemiLight);
+
+    // XY Ground Grid (Z = 0)
+    this._buildEnuGridAndAxes();
+
+    // OrbitControls
+    this.orbitControls = new OrbitControls(this.activeCamera, this.renderer.domElement);
+    this.orbitControls.enableDamping = true;
+    this.orbitControls.dampingFactor = 0.08;
+    this.orbitControls.target.set(0, 0, 0.5);
+    this.orbitControls.update();
+
+    // TransformControls (Gizmos: G, R, S)
+    this.transformControls = new TransformControls(this.activeCamera, this.renderer.domElement);
+    this.transformControls.setMode("translate");
+    this.transformControls.setSpace("world");
+    this.transformControls.setTranslationSnap(0.1);
+    this.transformControls.setRotationSnap(15 * DEG2RAD);
+    this.scene.add(this.transformControls);
+
+    this.transformControls.addEventListener("dragging-changed", (event) => {
+      this.orbitControls.enabled = !event.value;
+      this.isDraggingGizmo = event.value;
+      if (!event.value && this.selectedNodeId) {
+        this._commitGizmoTransformToBackend();
+      }
+    });
+
+    this.transformControls.addEventListener("objectChange", () => {
+      if (this.selectedNodeId) {
+        this._syncLiveInspectorFrom3DObject();
+      }
+    });
+
+    // Raycaster for clicking objects in the 3D scene
+    this.raycaster = new THREE.Raycaster();
+    this.pointerDownPos = new THREE.Vector2();
+
+    this.renderer.domElement.addEventListener("pointerdown", (e) => {
+      this.pointerDownPos.set(e.clientX, e.clientY);
+    });
+
+    this.renderer.domElement.addEventListener("pointerup", (e) => {
+      if (e.button !== 0 || this.isDraggingGizmo) return;
+      const dist = Math.hypot(e.clientX - this.pointerDownPos.x, e.clientY - this.pointerDownPos.y);
+      if (dist < 5) {
+        this._handleViewportClick(e);
+      }
+    });
+
+    this.nodesRootGroup = new THREE.Group();
+    this.scene.add(this.nodesRootGroup);
+
+    window.addEventListener("resize", () => this._onResize());
+    this._animate();
+  }
+
+  _buildEnuGridAndAxes() {
+    // Sub-grid (0.5m) & Major grid (1m) on XY plane (Z=0)
+    const gridMinor = new THREE.GridHelper(40, 80, 0x2a323d, 0x1a2028);
+    gridMinor.rotation.x = Math.PI / 2;
+    gridMinor.position.z = 0.001;
+    this.scene.add(gridMinor);
+
+    const gridMajor = new THREE.GridHelper(40, 40, 0x3b4654, 0x262f3a);
+    gridMajor.rotation.x = Math.PI / 2;
+    gridMajor.position.z = 0.002;
+    this.scene.add(gridMajor);
+
+    // Prominent ROS ENU Origin Axes (+X Red Forward, +Y Green Left, +Z Blue Up)
+    const axesGroup = new THREE.Group();
+    const axisLen = 2.5;
+    const makeAxisLine = (endVec, hexColor) => {
+      const geom = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, 0, 0.004),
+        endVec,
+      ]);
+      const mat = new THREE.LineBasicMaterial({ color: hexColor, linewidth: 2 });
+      return new THREE.Line(geom, mat);
+    };
+    axesGroup.add(makeAxisLine(new THREE.Vector3(axisLen, 0, 0.004), 0xef4444)); // +X Red
+    axesGroup.add(makeAxisLine(new THREE.Vector3(0, axisLen, 0.004), 0x22c55e)); // +Y Green
+    axesGroup.add(makeAxisLine(new THREE.Vector3(0, 0, axisLen), 0x3b82f6)); // +Z Blue
+    this.scene.add(axesGroup);
+  }
+
+  _onResize() {
+    if (!this.mountEl) return;
+    const w = this.mountEl.clientWidth;
+    const h = this.mountEl.clientHeight;
+    if (w <= 0 || h <= 0) return;
+
+    this.perspCamera.aspect = w / h;
+    this.perspCamera.updateProjectionMatrix();
+
+    const aspect = w / h;
+    const frustumSize = 16;
+    this.orthoCamera.left = (-frustumSize * aspect) / 2;
+    this.orthoCamera.right = (frustumSize * aspect) / 2;
+    this.orthoCamera.top = frustumSize / 2;
+    this.orthoCamera.bottom = -frustumSize / 2;
+    this.orthoCamera.updateProjectionMatrix();
+
+    this.renderer.setSize(w, h);
+  }
+
+  _animate() {
+    requestAnimationFrame(() => this._animate());
+    this.orbitControls.update();
+    this.renderer.render(this.scene, this.activeCamera);
+  }
+
+  // ===========================================================================
+  // 2. BACKEND API SYNCHRONIZATION & COMMAND DISPATCH
+  // ===========================================================================
+  async fetchInitialState() {
+    try {
+      const res = await fetch("/api/state");
+      const data = await res.json();
+      if (data.ok) {
+        this._applyBackendPayload(data);
+        if (!this.selectedNodeId) {
+          const starter = this.sceneGraph.nodes.find((n) => n.type === "primitive");
+          if (starter) this.selectNode(starter.id);
+        }
+      }
+    } catch (err) {
+      this._setStatus(`Error conectando al servidor: ${err.message}`);
+    }
+  }
+
+  async sendCommand(cmdBody) {
+    try {
+      const res = await fetch("/api/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cmdBody),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        if (data.selected_node_id) {
+          this.selectedNodeId = data.selected_node_id;
+        }
+        this._applyBackendPayload(data);
+      } else {
+        this._setStatus(`Error: ${data.error}`);
+      }
+    } catch (err) {
+      this._setStatus(`Error de red: ${err.message}`);
+    }
+  }
+
+  async triggerUndo() {
+    const res = await fetch("/api/undo", { method: "POST" });
+    const data = await res.json();
+    if (data.ok) {
+      this._applyBackendPayload(data);
+      this._setStatus("Deshacer aplicado (Ctrl+Z)");
+    }
+  }
+
+  async triggerRedo() {
+    const res = await fetch("/api/redo", { method: "POST" });
+    const data = await res.json();
+    if (data.ok) {
+      this._applyBackendPayload(data);
+      this._setStatus("Rehacer aplicado (Ctrl+Y)");
+    }
+  }
+
+  _applyBackendPayload(data) {
+    this.sceneGraph = data.scene_graph;
+    this.historyState = data.history || { can_undo: false, can_redo: false };
+    this.sdfPreview = data.sdf_preview || "";
+    this.sdfLineMap = data.sdf_line_map || {};
+    this.doctorAlerts = data.doctor_alerts || [];
+    if (Array.isArray(data.custom_objects)) {
+      this.customObjects = data.custom_objects;
+    }
+    if (data.presets) {
+      this.presets = data.presets;
+    }
+
+    // Verify selectedNodeId still exists
+    if (
+      this.selectedNodeId &&
+      !this.sceneGraph.nodes.some((n) => n.id === this.selectedNodeId)
+    ) {
+      this.selectedNodeId = null;
+    }
+
+    // Update topbar controls
+    document.getElementById("world-name-input").value = this.sceneGraph.world.name || "custebo_world";
+    document.getElementById("sdf-target-select").value =
+      this.sceneGraph.world.sdf_target || "harmonic";
+
+    const btnUndo = document.getElementById("btn-undo");
+    const btnRedo = document.getElementById("btn-redo");
+    btnUndo.disabled = !this.historyState.can_undo;
+    btnRedo.disabled = !this.historyState.can_redo;
+    btnUndo.title = this.historyState.last_action
+      ? `Deshacer: ${this.historyState.last_action} (Ctrl+Z)`
+      : "Deshacer (Ctrl+Z)";
+
+    this._rebuild3DSceneFromGraph();
+    this._renderCustomObjectsPalette();
+    this._renderOutliner();
+    this._renderDoctorGazebo();
+    this._renderLiveSdfXml();
+    this._renderInspector();
+  }
+
+  _renderCustomObjectsPalette() {
+    const grid = document.getElementById("custom-objects-grid");
+    if (!grid) return;
+    grid.innerHTML = "";
+
+    if (!this.customObjects || this.customObjects.length === 0) {
+      grid.innerHTML = `<div style="color:var(--text-muted);font-size:11px;padding:4px;">Sin objetos personalizados aún. Pulsa "➕ Importar 3D" o guarda un objeto desde el Inspector.</div>`;
+      return;
+    }
+
+    for (const item of this.customObjects) {
+      const row = document.createElement("div");
+      row.className = "custom-obj-row";
+      row.title = "Haz clic para insertar este objeto personalizado en el mundo 3D";
+
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "custom-obj-title";
+      titleSpan.textContent = item.label || item.filename || "Objeto Personalizado";
+      titleSpan.addEventListener("click", () => {
+        this.sendCommand({
+          type: "add_custom_object",
+          custom_id: item.id,
+        });
+        this._setStatus(`Insertado '${item.label}' en la escena`);
+      });
+
+      const delBtn = document.createElement("button");
+      delBtn.className = "custom-obj-del";
+      delBtn.textContent = "×";
+      delBtn.title = "Eliminar de Objetos Personalizados";
+      delBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const res = await fetch("/api/delete_custom_object", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ custom_id: item.id }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          this._applyBackendPayload(data);
+        }
+      });
+
+      row.appendChild(titleSpan);
+      row.appendChild(delBtn);
+      grid.appendChild(row);
+    }
+  }
+
+  // ===========================================================================
+  // 3. 3D SCENE RECONSTRUCTION FROM PURE SCENE GRAPH JSON
+  // ===========================================================================
+  _rebuild3DSceneFromGraph() {
+    this.transformControls.detach();
+
+    while (this.nodesRootGroup.children.length > 0) {
+      const child = this.nodesRootGroup.children[0];
+      this.nodesRootGroup.remove(child);
+    }
+    this.nodeObjectMap.clear();
+
+    const folderMap = new Map();
+    for (const f of this.sceneGraph.folders || []) {
+      folderMap.set(f.id, f);
+    }
+
+    for (const node of this.sceneGraph.nodes) {
+      const folder = folderMap.get(node.folder_id);
+      const isVisible = node.visible !== false && (!folder || folder.visible !== false);
+
+      const group = this._createThreeGroupForNode(node);
+      group.visible = isVisible;
+      group.userData.nodeId = node.id;
+      group.userData.locked = Boolean(node.locked || (folder && folder.locked));
+
+      this.nodesRootGroup.add(group);
+      this.nodeObjectMap.set(node.id, group);
+    }
+
+    if (this.selectedNodeId) {
+      const selectedGroup = this.nodeObjectMap.get(this.selectedNodeId);
+      const nodeData = this._getSelectedNode();
+      if (selectedGroup && nodeData && !selectedGroup.userData.locked && selectedGroup.visible) {
+        this.transformControls.attach(selectedGroup);
+      }
+    }
+  }
+
+  _createThreeGroupForNode(node) {
+    const group = new THREE.Group();
+    const pose = node.pose || [0, 0, 0, 0, 0, 0];
+    const scale = node.scale || [1, 1, 1];
+
+    group.position.set(pose[0], pose[1], pose[2]);
+    // Intrinsic ZYX Euler matches Gazebo <pose> R P Y in ENU Z-Up
+    group.rotation.set(pose[3], pose[4], pose[5], "ZYX");
+    group.scale.set(scale[0], scale[1], scale[2]);
+
+    if (node.type === "ground_plane") {
+      const size = node.geometry?.size || [100, 100];
+      const color = node.material?.color || [0.42, 0.44, 0.47, 1.0];
+      const geom = new THREE.PlaneGeometry(size[0], size[1]);
+      const mat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(color[0], color[1], color[2]),
+        roughness: 0.9,
+        metalness: 0.05,
+        polygonOffset: true,
+        polygonOffsetFactor: 2,
+        polygonOffsetUnits: 2,
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.receiveShadow = true;
+      mesh.userData.nodeId = node.id;
+      group.add(mesh);
+      return group;
+    }
+
+    if (node.type === "primitive" || node.type === "include" || node.type === "mesh") {
+      const isSelected = node.id === this.selectedNodeId;
+      const parts = Array.isArray(node.parts) && node.parts.length > 0 ? node.parts : null;
+
+      if (node.type === "mesh") {
+        const meshInfo = node.mesh || {};
+        const fname = meshInfo.filename || "agv_chassis.stl";
+        const unitScale = Number(meshInfo.unit_scale ?? 1.0);
+        const upAxis = meshInfo.up_axis || "Z_UP";
+        const color = node.material?.color || [0.22, 0.58, 0.92, 1.0];
+        const bsize = node.geometry?.size || [1, 1, 1];
+
+        const mat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(color[0], color[1], color[2]),
+          roughness: 0.4,
+          metalness: 0.3,
+          transparent: this.debugLayers.inertia,
+          opacity: this.debugLayers.inertia ? 0.45 : 1.0,
+        });
+
+        // Temporary bounding placeholder until STL/OBJ finishes loading (or from cache)
+        const attachLoadedGeom = (geom) => {
+          const cloned = geom.clone();
+          cloned.scale(unitScale, unitScale, unitScale);
+          if (upAxis === "Y_UP_TO_Z_UP") {
+            cloned.rotateX(Math.PI / 2);
+          }
+          cloned.computeVertexNormals();
+          const m = new THREE.Mesh(cloned, mat);
+          m.castShadow = true;
+          m.receiveShadow = true;
+          m.userData.nodeId = node.id;
+          group.add(m);
+
+          if (isSelected) {
+            const edges = new THREE.EdgesGeometry(cloned);
+            group.add(new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x60a5fa })));
+          }
+        };
+
+        if (this.meshGeometryCache.has(fname)) {
+          attachLoadedGeom(this.meshGeometryCache.get(fname));
+        } else {
+          // Placeholder box while loading
+          const boxG = new THREE.BoxGeometry(bsize[0], bsize[1], bsize[2]);
+          const placeholder = new THREE.Mesh(boxG, mat);
+          placeholder.userData.nodeId = node.id;
+          group.add(placeholder);
+
+          const url = `/meshes/${encodeURIComponent(fname)}`;
+          if (fname.toLowerCase().endsWith(".stl")) {
+            this.stlLoader.load(url, (loadedGeom) => {
+              this.meshGeometryCache.set(fname, loadedGeom);
+              this._rebuild3DSceneFromGraph();
+            });
+          } else if (fname.toLowerCase().endsWith(".obj")) {
+            this.objLoader.load(url, (objGroup) => {
+              let foundGeom = null;
+              objGroup.traverse((ch) => {
+                if (ch.isMesh && !foundGeom) foundGeom = ch.geometry.clone();
+              });
+              if (foundGeom) {
+                this.meshGeometryCache.set(fname, foundGeom);
+                this._rebuild3DSceneFromGraph();
+              }
+            });
+          }
+        }
+
+        // Collision proxy wireframe according to `node.collision.strategy`
+        if (this.debugLayers.collision && node.collision?.enabled !== false) {
+          const strat = node.collision?.strategy || "aabb";
+          let colGeom;
+          if (strat === "cylinder") {
+            const r = Number(node.geometry?.radius ?? 0.5);
+            const l = Number(node.geometry?.length ?? 1.0);
+            colGeom = new THREE.CylinderGeometry(r, r, l, 24);
+            colGeom.rotateX(Math.PI / 2);
+          } else if (strat === "sphere") {
+            const r = Number(node.geometry?.radius ?? 0.5);
+            colGeom = new THREE.SphereGeometry(r, 20, 16);
+          } else {
+            colGeom = new THREE.BoxGeometry(bsize[0], bsize[1], bsize[2]);
+          }
+          const colMesh = new THREE.Mesh(
+            colGeom,
+            new THREE.MeshBasicMaterial({
+              color: node.static ? 0x22c55e : 0xf59e0b,
+              wireframe: true,
+            })
+          );
+          colMesh.scale.set(1.02, 1.02, 1.02);
+          group.add(colMesh);
+        }
+
+        if (this.debugLayers.tf) {
+          group.add(new THREE.AxesHelper(0.75));
+        }
+        return group;
+      }
+
+      const buildPartBufferGeom = (shape, sz, radius, length) => {
+        if (shape === "box") {
+          return new THREE.BoxGeometry(sz[0], sz[1], sz[2]);
+        }
+        if (shape === "cylinder") {
+          const g = new THREE.CylinderGeometry(radius, radius, length, 28);
+          g.rotateX(Math.PI / 2); // Align cylinder with ENU +Z
+          return g;
+        }
+        if (shape === "sphere") {
+          return new THREE.SphereGeometry(radius, 28, 20);
+        }
+        return new THREE.PlaneGeometry(sz[0] || 2, sz[1] || 2);
+      };
+
+      if (parts) {
+        // Render all sub-parts of the parametric composite / archetype
+        for (const p of parts) {
+          const pShape = p.shape || "box";
+          const pSize = p.size || [1, 1, 1];
+          const pRad = Number(p.radius ?? 0.2);
+          const pLen = Number(p.length ?? 1.0);
+          const pColor = p.color || node.material?.color || [0.75, 0.78, 0.82, 1.0];
+          const lp = p.local_pose || [0, 0, 0, 0, 0, 0];
+
+          const partGeom = buildPartBufferGeom(pShape, pSize, pRad, pLen);
+          const partMat = new THREE.MeshStandardMaterial({
+            color: new THREE.Color(pColor[0], pColor[1], pColor[2]),
+            roughness: Number(node.material?.roughness ?? 0.55),
+            metalness: Number(node.material?.metalness ?? 0.15),
+            transparent: this.debugLayers.inertia,
+            opacity: this.debugLayers.inertia ? 0.45 : 1.0,
+          });
+
+          const partMesh = new THREE.Mesh(partGeom, partMat);
+          partMesh.position.set(lp[0], lp[1], lp[2]);
+          partMesh.rotation.set(lp[3], lp[4], lp[5], "ZYX");
+          partMesh.castShadow = true;
+          partMesh.receiveShadow = true;
+          partMesh.userData.nodeId = node.id;
+          group.add(partMesh);
+
+          if (isSelected) {
+            const edges = new THREE.EdgesGeometry(partGeom);
+            const lineSeg = new THREE.LineSegments(
+              edges,
+              new THREE.LineBasicMaterial({ color: 0x60a5fa })
+            );
+            lineSeg.position.copy(partMesh.position);
+            lineSeg.rotation.copy(partMesh.rotation);
+            group.add(lineSeg);
+          }
+
+          if (this.debugLayers.collision && node.collision?.enabled !== false) {
+            const colMesh = new THREE.Mesh(
+              partGeom.clone(),
+              new THREE.MeshBasicMaterial({
+                color: node.static ? 0x22c55e : 0xf59e0b,
+                wireframe: true,
+              })
+            );
+            colMesh.position.copy(partMesh.position);
+            colMesh.rotation.copy(partMesh.rotation);
+            colMesh.scale.set(1.01, 1.01, 1.01);
+            group.add(colMesh);
+          }
+        }
+      } else {
+        // Standard single primitive
+        const geomData = node.geometry || {};
+        const shape = geomData.shape || "box";
+        const bufferGeom = buildPartBufferGeom(
+          shape,
+          geomData.size || [1, 1, 1],
+          Number(geomData.radius ?? 0.5),
+          Number(geomData.length ?? 1.0)
+        );
+
+        const color = node.material?.color || [0.25, 0.52, 0.85, 1.0];
+        const mat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(color[0], color[1], color[2]),
+          roughness: Number(node.material?.roughness ?? 0.45),
+          metalness: Number(node.material?.metalness ?? 0.1),
+          transparent: this.debugLayers.inertia,
+          opacity: this.debugLayers.inertia ? 0.45 : 1.0,
+        });
+
+        const mesh = new THREE.Mesh(bufferGeom, mat);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.userData.nodeId = node.id;
+        group.add(mesh);
+
+        if (isSelected) {
+          const edges = new THREE.EdgesGeometry(bufferGeom);
+          const lineMat = new THREE.LineBasicMaterial({ color: 0x60a5fa });
+          group.add(new THREE.LineSegments(edges, lineMat));
+        }
+
+        if (this.debugLayers.collision && node.collision?.enabled !== false) {
+          const colGeom = bufferGeom.clone();
+          const colMat = new THREE.MeshBasicMaterial({
+            color: node.static ? 0x22c55e : 0xf59e0b,
+            wireframe: true,
+          });
+          const colMesh = new THREE.Mesh(colGeom, colMat);
+          colMesh.scale.set(1.01, 1.01, 1.01);
+          group.add(colMesh);
+        }
+      }
+
+      // Debug Layer: Center of Mass & Magenta Inertia Ellipsoid (Gazebo style)
+      if (this.debugLayers.inertia && !node.static && node.inertial) {
+        const com = node.inertial.center_of_mass || [0, 0, 0];
+        const mass = Math.max(Number(node.inertial.mass || 1.0), 0.001);
+        const ixx = Math.max(Number(node.inertial.ixx || 0.1), 1e-4);
+        const iyy = Math.max(Number(node.inertial.iyy || 0.1), 1e-4);
+        const izz = Math.max(Number(node.inertial.izz || 0.1), 1e-4);
+
+        // Equivalent uniform ellipsoid semi-axes from principal moments
+        const rx = Math.sqrt(Math.max(2.5 * (iyy + izz - ixx) / mass, 0.02));
+        const ry = Math.sqrt(Math.max(2.5 * (ixx + izz - iyy) / mass, 0.02));
+        const rz = Math.sqrt(Math.max(2.5 * (ixx + iyy - izz) / mass, 0.02));
+
+        const ellipGeom = new THREE.SphereGeometry(1, 16, 12);
+        const ellipMat = new THREE.MeshBasicMaterial({
+          color: 0xd946ef,
+          wireframe: true,
+        });
+        const ellipMesh = new THREE.Mesh(ellipGeom, ellipMat);
+        ellipMesh.position.set(com[0], com[1], com[2]);
+        ellipMesh.scale.set(rx, ry, rz);
+        group.add(ellipMesh);
+      }
+
+      // Debug Layer: Local TF Axes
+      if (this.debugLayers.tf) {
+        const axes = new THREE.AxesHelper(0.75);
+        group.add(axes);
+      }
+
+      return group;
+    }
+
+    if (node.type === "light") {
+      const ldata = node.light || {};
+      const ltype = ldata.light_type || "point";
+      const diff = ldata.diffuse || [0.95, 0.95, 0.9, 1.0];
+      const threeColor = new THREE.Color(diff[0], diff[1], diff[2]);
+      const intensity = Number(ldata.intensity ?? 1.0);
+
+      let lightObj;
+      if (ltype === "directional") {
+        lightObj = new THREE.DirectionalLight(threeColor, intensity * 1.4);
+        lightObj.castShadow = Boolean(ldata.cast_shadows);
+      } else if (ltype === "spot") {
+        lightObj = new THREE.SpotLight(
+          threeColor,
+          intensity * 15,
+          Number(ldata.range ?? 20),
+          Number(ldata.spot?.outer_angle ?? 0.9)
+        );
+        lightObj.castShadow = Boolean(ldata.cast_shadows);
+      } else {
+        lightObj = new THREE.PointLight(threeColor, intensity * 10, Number(ldata.range ?? 20));
+        lightObj.castShadow = Boolean(ldata.cast_shadows);
+      }
+      group.add(lightObj);
+
+      // Visual bulb gizmo so the user can click and move the light in 3D
+      const bulbGeom = new THREE.OctahedronGeometry(0.22, 1);
+      const bulbMat = new THREE.MeshBasicMaterial({
+        color: node.id === this.selectedNodeId ? 0x60a5fa : 0xfacc15,
+        wireframe: true,
+      });
+      const bulbMesh = new THREE.Mesh(bulbGeom, bulbMat);
+      bulbMesh.userData.nodeId = node.id;
+      group.add(bulbMesh);
+
+      if (this.debugLayers.tf) {
+        group.add(new THREE.AxesHelper(0.5));
+      }
+      return group;
+    }
+
+    return group;
+  }
+
+  _handleViewportClick(event) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1
+    );
+
+    this.raycaster.setFromCamera(mouse, this.activeCamera);
+
+    // Interactive 3D Ruler or 2D->3D Floorplan Tracer mode
+    if (this.activeViewportTool === "ruler" || this.activeViewportTool === "floorplan") {
+      const groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+      const hitPt = new THREE.Vector3();
+      if (this.raycaster.ray.intersectPlane(groundPlane, hitPt)) {
+        const pt = [Number(hitPt.x.toFixed(3)), Number(hitPt.y.toFixed(3)), 0.0];
+        if (this.activeViewportTool === "ruler") {
+          this.rulerPoints = this.rulerPoints || [];
+          this.rulerPoints.push(pt);
+          if (this.rulerPoints.length === 1) {
+            this._setStatus(`📏 Regla 3D: P1 = [${pt[0]}, ${pt[1]}, 0] m. Haz clic en el segundo punto.`);
+          } else {
+            const p1 = this.rulerPoints[0];
+            const p2 = this.rulerPoints[1];
+            this.rulerPoints = [];
+            const dx = p2[0] - p1[0];
+            const dy = p2[1] - p1[1];
+            const dist = Math.hypot(dx, dy);
+            const yawDeg = ((Math.atan2(dy, dx) * 180) / Math.PI).toFixed(1);
+            this._setStatus(
+              `📏 Distancia: ${dist.toFixed(3)} m | ΔX=${dx.toFixed(2)}m, ΔY=${dy.toFixed(2)}m | Yaw=${yawDeg}°`
+            );
+          }
+          return;
+        } else if (this.activeViewportTool === "floorplan") {
+          this.floorplanPoints = this.floorplanPoints || [];
+          this.floorplanPoints.push([pt[0], pt[1]]);
+          this._setStatus(
+            `✏ Trazador 2D→3D: ${this.floorplanPoints.length} vértices añadidos ([${pt[0]}, ${pt[1]}]). Pulsa Enter para extruir muros o Esc para cancelar.`
+          );
+          return;
+        }
+      }
+    }
+
+    const meshes = [];
+    this.nodesRootGroup.traverse((obj) => {
+      if (obj.isMesh && obj.userData.nodeId) {
+        const parentGroup = this.nodeObjectMap.get(obj.userData.nodeId);
+        if (parentGroup && parentGroup.visible && !parentGroup.userData.locked) {
+          meshes.push(obj);
+        }
+      }
+    });
+
+    const hits = this.raycaster.intersectObjects(meshes, false);
+    if (hits.length > 0) {
+      const hitNodeId = hits[0].object.userData.nodeId;
+      this.selectNode(hitNodeId);
+    } else {
+      this.selectNode(null);
+    }
+  }
+
+  selectNode(nodeId) {
+    this.selectedNodeId = nodeId;
+    this._rebuild3DSceneFromGraph();
+    this._renderOutliner();
+    this._renderInspector();
+    this._highlightSelectedNodeInXml();
+
+    const hudEl = document.getElementById("hud-selection-info");
+    const node = this._getSelectedNode();
+    if (node) {
+      const p = node.pose || [0, 0, 0, 0, 0, 0];
+      hudEl.innerHTML = `Seleccionado: <b>${node.name}</b> [${p[0].toFixed(2)}, ${p[1].toFixed(2)}, ${p[2].toFixed(2)} m]`;
+    } else {
+      hudEl.textContent = "Ningún objeto seleccionado";
+    }
+  }
+
+  _getSelectedNode() {
+    if (!this.sceneGraph || !this.selectedNodeId) return null;
+    return this.sceneGraph.nodes.find((n) => n.id === this.selectedNodeId) || null;
+  }
+
+  _syncLiveInspectorFrom3DObject() {
+    const group = this.nodeObjectMap.get(this.selectedNodeId);
+    const node = this._getSelectedNode();
+    if (!group || !node) return;
+
+    const eulerZyx = new THREE.Euler().setFromQuaternion(group.quaternion, "ZYX");
+    node.pose = [
+      Number(group.position.x.toFixed(4)),
+      Number(group.position.y.toFixed(4)),
+      Number(group.position.z.toFixed(4)),
+      Number(eulerZyx.x.toFixed(4)),
+      Number(eulerZyx.y.toFixed(4)),
+      Number(eulerZyx.z.toFixed(4)),
+    ];
+    node.scale = [
+      Number(group.scale.x.toFixed(4)),
+      Number(group.scale.y.toFixed(4)),
+      Number(group.scale.z.toFixed(4)),
+    ];
+    this._renderInspector();
+  }
+
+  async _commitGizmoTransformToBackend() {
+    const group = this.nodeObjectMap.get(this.selectedNodeId);
+    const node = this._getSelectedNode();
+    if (!group || !node) return;
+
+    const eulerZyx = new THREE.Euler().setFromQuaternion(group.quaternion, "ZYX");
+    const newPose = [
+      Number(group.position.x.toFixed(6)),
+      Number(group.position.y.toFixed(6)),
+      Number(group.position.z.toFixed(6)),
+      Number(eulerZyx.x.toFixed(6)),
+      Number(eulerZyx.y.toFixed(6)),
+      Number(eulerZyx.z.toFixed(6)),
+    ];
+    const newScale = [
+      Math.max(0.001, Number(group.scale.x.toFixed(6))),
+      Math.max(0.001, Number(group.scale.y.toFixed(6))),
+      Math.max(0.001, Number(group.scale.z.toFixed(6))),
+    ];
+
+    await this.sendCommand({
+      type: "update_node",
+      node_id: node.id,
+      patch: { pose: newPose, scale: newScale },
+      label: `Transform '${node.name}'`,
+    });
+  }
+
+  // ===========================================================================
+  // 4. OUTLINER HIERARCHY RENDERING
+  // ===========================================================================
+  _renderOutliner() {
+    const container = document.getElementById("outliner-tree");
+    if (!this.sceneGraph) return;
+    container.innerHTML = "";
+
+    const folders = this.sceneGraph.folders || [];
+    for (const folder of folders) {
+      const fDiv = document.createElement("div");
+      fDiv.className = "folder-group";
+
+      const fHeader = document.createElement("div");
+      fHeader.className = "folder-header";
+      fHeader.innerHTML = `<span>📁 ${folder.name}</span>`;
+      fDiv.appendChild(fHeader);
+
+      const folderNodes = this.sceneGraph.nodes.filter(
+        (n) => (n.folder_id || "folder_props") === folder.id
+      );
+
+      for (const node of folderNodes) {
+        const item = document.createElement("div");
+        item.className = "outliner-item" + (node.id === this.selectedNodeId ? " selected" : "");
+
+        const archIcons = {
+          wall: "🧱",
+          wall_doorway: "🚪",
+          wall_window: "🪟",
+          wall_corner_l: "📐",
+          column_square: "🏛",
+          stairs: "🪜",
+          ramp: "📐",
+          warehouse_rack: "🗄",
+          table: "🪑",
+          euro_pallet: "🪵",
+          safety_fence: "🚧",
+          jersey_barrier: "🚧",
+          traffic_cone: "🔺",
+          bollard: "🛑",
+          cardboard_box: "📦",
+        };
+        const iconMap = {
+          ground_plane: "⬛",
+          light: "💡",
+          mesh: "🧩",
+          include: "🌐",
+          primitive:
+            archIcons[node.archetype] ||
+            (node.geometry?.shape === "cylinder"
+              ? "🛢"
+              : node.geometry?.shape === "sphere"
+              ? "🟠"
+              : "📦"),
+        };
+        const icon = iconMap[node.type] || "🔹";
+
+        const nameSpan = document.createElement("div");
+        nameSpan.className = "outliner-item-name";
+        nameSpan.innerHTML = `<span>${icon}</span><span>${node.name}</span>`;
+        nameSpan.addEventListener("click", () => this.selectNode(node.id));
+
+        const toggles = document.createElement("div");
+        toggles.className = "outliner-toggles";
+
+        // Visibility Eye Toggle
+        const btnVis = document.createElement("button");
+        btnVis.className = "tiny-toggle" + (node.visible === false ? " off" : "");
+        btnVis.textContent = "👁";
+        btnVis.title = node.visible === false ? "Mostrar objeto" : "Ocultar objeto";
+        btnVis.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.sendCommand({
+            type: "update_node",
+            node_id: node.id,
+            patch: { visible: node.visible === false },
+            label: `Toggle visibility '${node.name}'`,
+          });
+        });
+
+        // Lock Selection Toggle
+        const btnLock = document.createElement("button");
+        btnLock.className = "tiny-toggle" + (!node.locked ? " off" : "");
+        btnLock.textContent = node.locked ? "🔒" : "🔓";
+        btnLock.title = node.locked ? "Desbloquear selección" : "Bloquear selección";
+        btnLock.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.sendCommand({
+            type: "update_node",
+            node_id: node.id,
+            patch: { locked: !node.locked },
+            label: `Toggle lock '${node.name}'`,
+          });
+        });
+
+        toggles.appendChild(btnVis);
+        toggles.appendChild(btnLock);
+
+        item.appendChild(nameSpan);
+        item.appendChild(toggles);
+        fDiv.appendChild(item);
+      }
+
+      container.appendChild(fDiv);
+    }
+  }
+
+  // ===========================================================================
+  // 5. PROPERTY & PHYSICS INSPECTOR PANEL
+  // ===========================================================================
+  _renderInspector() {
+    const container = document.getElementById("inspector-content");
+    const node = this._getSelectedNode();
+
+    if (!node) {
+      container.innerHTML = `
+        <div class="empty-inspector">
+          Selecciona cualquier entidad en el Visor 3D o en la Jerarquía (Outliner) para editar su pose ENU, dimensiones, color y propiedades físicas.
+        </div>`;
+      return;
+    }
+
+    const pose = node.pose || [0, 0, 0, 0, 0, 0];
+    const scale = node.scale || [1, 1, 1];
+    const factor = this.showAnglesInDegrees ? RAD2DEG : 1.0;
+    const unitSymbol = this.showAnglesInDegrees ? "°" : "rad";
+
+    const rDisp = (pose[3] * factor).toFixed(2);
+    const pDisp = (pose[4] * factor).toFixed(2);
+    const yDisp = (pose[5] * factor).toFixed(2);
+
+    let html = `
+      <!-- IDENTITY CARD -->
+      <div class="insp-card">
+        <div class="insp-card-title">Identidad y Estado</div>
+        <div class="insp-row">
+          <span class="insp-label">Nombre</span>
+          <input id="insp-name" class="insp-input" type="text" value="${node.name}" />
+        </div>
+        <div class="insp-row">
+          <span class="insp-label">Estático (&lt;static&gt;)</span>
+          <input id="insp-static" type="checkbox" ${node.static ? "checked" : ""} ${
+      node.type === "ground_plane" || node.type === "light" ? "disabled" : ""
+    } />
+        </div>
+        ${
+          node.type !== "ground_plane" && node.type !== "light"
+            ? `<button id="btn-save-custom-prefab" class="tool-btn" style="width:100%;margin-top:4px;text-align:center;" title="Guardar este objeto en la sección 'Objetos Personalizados' para reutilizarlo">⭐ Guardar en Objetos Personalizados</button>`
+            : ""
+        }
+      </div>
+
+      <!-- 6-DOF ENU POSE CARD -->
+      <div class="insp-card">
+        <div class="insp-card-title">Pose 6-DOF (ENU Z-Up)</div>
+        <span class="insp-label">Posición [x, y, z] (metros)</span>
+        <div class="vec3-grid">
+          <div class="vec-field"><span class="vec-axis x">X</span><input id="insp-px" type="number" step="0.1" value="${pose[0]}" /></div>
+          <div class="vec-field"><span class="vec-axis y">Y</span><input id="insp-py" type="number" step="0.1" value="${pose[1]}" /></div>
+          <div class="vec-field"><span class="vec-axis z">Z</span><input id="insp-pz" type="number" step="0.1" value="${pose[2]}" /></div>
+        </div>
+        <span class="insp-label">Orientación [Roll, Pitch, Yaw] (${unitSymbol})</span>
+        <div class="vec3-grid">
+          <div class="vec-field"><span class="vec-axis x">R</span><input id="insp-rr" type="number" step="1" value="${rDisp}" /></div>
+          <div class="vec-field"><span class="vec-axis y">P</span><input id="insp-rp" type="number" step="1" value="${pDisp}" /></div>
+          <div class="vec-field"><span class="vec-axis z">Y</span><input id="insp-ry" type="number" step="1" value="${yDisp}" /></div>
+        </div>
+        <span class="insp-label">Escala [Sx, Sy, Sz]</span>
+        <div class="vec3-grid">
+          <div class="vec-field"><span class="vec-axis x">X</span><input id="insp-sx" type="number" step="0.1" min="0.01" value="${scale[0]}" /></div>
+          <div class="vec-field"><span class="vec-axis y">Y</span><input id="insp-sy" type="number" step="0.1" min="0.01" value="${scale[1]}" /></div>
+          <div class="vec-field"><span class="vec-axis z">Z</span><input id="insp-sz" type="number" step="0.1" min="0.01" value="${scale[2]}" /></div>
+        </div>
+      </div>
+    `;
+
+    // ARCHETYPE / COMPOSITE PARAMETRIC BUILDER CARD
+    if (node.archetype && node.archetype_params) {
+      const paramLabels = {
+        length: "Largo (m)",
+        length_x: "Largo Eje X (m)",
+        length_y: "Largo Eje Y (m)",
+        width: "Ancho (m)",
+        depth: "Profundidad (m)",
+        thickness: "Grosor (m)",
+        height: "Altura (m)",
+        door_width: "Ancho Puerta (m)",
+        door_height: "Alto Puerta (m)",
+        window_width: "Ancho Ventana (m)",
+        window_height: "Alto Ventana (m)",
+        sill_height: "Altura Antepecho (m)",
+        steps: "Nº Escalones",
+        step_depth: "Huella Peldaño (m)",
+        step_height: "Contrahuella (m)",
+        shelves: "Nº Baldas",
+        post_width: "Grosor Poste (m)",
+        top_thickness: "Grosor Tablero (m)",
+        leg_width: "Grosor Patas (m)",
+        rail_radius: "Radio Tubo (m)",
+        bottom_width: "Ancho Base (m)",
+        top_width: "Ancho Superior (m)",
+        base_width: "Ancho Base (m)",
+        radius: "Radio (m)",
+        dx: "Largo X (m)",
+        dy: "Ancho Y (m)",
+        dz: "Alto Z (m)",
+      };
+      const hexColor = rgbaToHex(node.material?.color);
+      const partCount = Array.isArray(node.parts) ? node.parts.length : 1;
+
+      html += `<div class="insp-card">
+        <div class="insp-card-title">🏗 Elemento Paramétrico: ${node.archetype.toUpperCase()} (${partCount} pieza${partCount > 1 ? "s" : ""})</div>`;
+
+      for (const [pKey, pVal] of Object.entries(node.archetype_params)) {
+        if (pKey === "segments") continue;
+        const isInt = pKey === "steps" || pKey === "shelves";
+        const step = isInt ? "1" : "0.05";
+        const min = isInt ? "1" : "0.02";
+        const lbl = paramLabels[pKey] || pKey;
+        html += `
+          <div class="insp-row">
+            <span class="insp-label">${lbl}</span>
+            <input class="insp-input insp-arch-param" data-param-key="${pKey}" type="number" step="${step}" min="${min}" value="${pVal}" />
+          </div>`;
+      }
+
+      html += `
+        <div class="insp-row">
+          <span class="insp-label">Color Principal</span>
+          <input id="insp-color" type="color" value="${hexColor}" style="width:70px;height:26px;border:none;background:transparent;cursor:pointer;" />
+        </div>`;
+
+      if (partCount > 1) {
+        html += `
+          <button id="btn-explode-composite" class="tool-btn" style="width:100%;margin-top:4px;text-align:center;" title="Convierte las sub-partes de este elemento compuesto en objetos primitivos independientes">
+            💥 Desglosar en ${partCount} Piezas Sueltas
+          </button>`;
+      }
+      html += `</div>`;
+    } else if (node.type === "primitive" || node.type === "ground_plane") {
+      // GEOMETRY & MATERIAL CARD FOR SIMPLE PRIMITIVES
+      const geom = node.geometry || {};
+      const shape = geom.shape || "box";
+      const hexColor = rgbaToHex(node.material?.color);
+
+      html += `<div class="insp-card">
+        <div class="insp-card-title">Geometría (${shape.toUpperCase()}) y Material</div>`;
+
+      if (shape === "box") {
+        const sz = geom.size || [1, 1, 1];
+        html += `
+          <span class="insp-label">Dimensiones [dx, dy, dz] (m)</span>
+          <div class="vec3-grid">
+            <div class="vec-field"><span class="vec-axis x">W</span><input id="insp-gdx" type="number" step="0.1" min="0.01" value="${sz[0]}" /></div>
+            <div class="vec-field"><span class="vec-axis y">D</span><input id="insp-gdy" type="number" step="0.1" min="0.01" value="${sz[1]}" /></div>
+            <div class="vec-field"><span class="vec-axis z">H</span><input id="insp-gdz" type="number" step="0.1" min="0.01" value="${sz[2]}" /></div>
+          </div>`;
+      } else if (shape === "cylinder") {
+        html += `
+          <div class="insp-row">
+            <span class="insp-label">Radio (m)</span>
+            <input id="insp-grad" class="insp-input" type="number" step="0.05" min="0.01" value="${geom.radius ?? 0.5}" />
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">Longitud Z (m)</span>
+            <input id="insp-glen" class="insp-input" type="number" step="0.1" min="0.01" value="${geom.length ?? 1.0}" />
+          </div>`;
+      } else if (shape === "sphere") {
+        html += `
+          <div class="insp-row">
+            <span class="insp-label">Radio (m)</span>
+            <input id="insp-grad" class="insp-input" type="number" step="0.05" min="0.01" value="${geom.radius ?? 0.5}" />
+          </div>`;
+      } else if (shape === "plane") {
+        const sz = geom.size || [100, 100];
+        html += `
+          <div class="insp-row">
+            <span class="insp-label">Tamaño XY (m)</span>
+            <input id="insp-gplane" class="insp-input" type="number" step="5" min="1" value="${sz[0]}" />
+          </div>`;
+      }
+
+      html += `
+        <div class="insp-row">
+          <span class="insp-label">Color Difuso</span>
+          <input id="insp-color" type="color" value="${hexColor}" style="width:70px;height:26px;border:none;background:transparent;cursor:pointer;" />
+        </div>
+      </div>`;
+    }
+
+    // CAD MESH & COLLISION OPTIMIZER CARD (PHASE 2)
+    if (node.type === "mesh") {
+      const mInfo = node.mesh || {};
+      const col = node.collision || {};
+      const strat = col.strategy || "aabb";
+      const hexColor = rgbaToHex(node.material?.color);
+
+      html += `
+        <div class="insp-card">
+          <div class="insp-card-title">🧩 Malla CAD (${mInfo.filename || "mesh"})</div>
+          <div class="insp-row">
+            <span class="insp-label">Triángulos</span>
+            <span style="font-family:var(--font-mono);font-size:11.5px;">${mInfo.triangle_count || "?"} tris</span>
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">Unidades CAD</span>
+            <select id="insp-mesh-unit" class="insp-select">
+              <option value="m" ${mInfo.unit === "m" ? "selected" : ""}>Metros (m × 1.0)</option>
+              <option value="mm" ${mInfo.unit === "mm" ? "selected" : ""}>Milímetros → m (× 0.001)</option>
+              <option value="cm" ${mInfo.unit === "cm" ? "selected" : ""}>Centímetros → m (× 0.01)</option>
+            </select>
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">Eje Arriba</span>
+            <select id="insp-mesh-axis" class="insp-select">
+              <option value="Z_UP" ${mInfo.up_axis !== "Y_UP_TO_Z_UP" ? "selected" : ""}>Z-Up (Nativo ROS)</option>
+              <option value="Y_UP_TO_Z_UP" ${mInfo.up_axis === "Y_UP_TO_Z_UP" ? "selected" : ""}>Y-Up → Z-Up (+90° X)</option>
+            </select>
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">Optimizador &lt;collision&gt;</span>
+            <select id="insp-col-strategy" class="insp-select">
+              <option value="aabb" ${strat === "aabb" || strat === "primitive" ? "selected" : ""}>1) Caja Delimitadora (AABB)</option>
+              <option value="cylinder" ${strat === "cylinder" ? "selected" : ""}>2) Cilindro Envolvente</option>
+              <option value="sphere" ${strat === "sphere" ? "selected" : ""}>3) Esfera Envolvente</option>
+              <option value="convex_hull" ${strat === "convex_hull" ? "selected" : ""}>4) Envolvente Convexa (Hull)</option>
+              <option value="decimated_mesh" ${strat === "decimated_mesh" ? "selected" : ""}>5) Malla Simplificada (10%)</option>
+              <option value="full_mesh" ${strat === "full_mesh" ? "selected" : ""}>6) Malla Original Completa</option>
+            </select>
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">Color Visual</span>
+            <input id="insp-color" type="color" value="${hexColor}" style="width:70px;height:26px;border:none;background:transparent;cursor:pointer;" />
+          </div>
+        </div>
+      `;
+    }
+
+    // INCLUDE NODE CARD (GAZEBO FUEL / ROS 2 WORKSPACE)
+    if (node.type === "include") {
+      const uriVal = node.include?.uri || "";
+      html += `
+        <div class="insp-card">
+          <div class="insp-card-title">🌐 Modelo Incluido (&lt;include&gt;)</div>
+          <span class="insp-label">URI (Fuel / model:// / package://)</span>
+          <input id="insp-inc-uri" class="insp-input" type="text" value="${uriVal}" />
+        </div>
+      `;
+    }
+
+    // AUTO-PHYSICS & INERTIA TENSOR CARD FOR PRIMITIVES & MESHES
+    if (node.type === "primitive" || node.type === "mesh") {
+      const inertial = node.inertial || {};
+      const col = node.collision || {};
+      const curPreset = inertial.material_preset || "wood";
+
+      const materialOptions = Object.entries(this.presets.materials || {})
+        .map(
+          ([k, v]) =>
+            `<option value="${k}" ${k === curPreset ? "selected" : ""}>${v.label} (${v.density} kg/m³)</option>`
+        )
+        .join("");
+
+      html += `
+        <div class="insp-card">
+          <div class="insp-card-title">Física e Inercia (&lt;inertial&gt;)</div>
+          <div class="insp-row">
+            <span class="insp-label">Material</span>
+            <select id="insp-mat-preset" class="insp-select">${materialOptions}</select>
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">Masa (kg)</span>
+            <input id="insp-mass" class="insp-input" type="number" step="0.5" min="0.001" value="${Number(inertial.mass ?? 1.0).toFixed(3)}" />
+          </div>
+          <span class="insp-label">Tensor de Inercia (kg·m²)</span>
+          <div class="inertia-matrix-grid">
+            <div class="inertia-cell"><span>ixx</span><span>${Number(inertial.ixx ?? 0).toFixed(4)}</span></div>
+            <div class="inertia-cell"><span>iyy</span><span>${Number(inertial.iyy ?? 0).toFixed(4)}</span></div>
+            <div class="inertia-cell"><span>izz</span><span>${Number(inertial.izz ?? 0).toFixed(4)}</span></div>
+            <div class="inertia-cell"><span>ixy</span><span>${Number(inertial.ixy ?? 0).toFixed(4)}</span></div>
+            <div class="inertia-cell"><span>ixz</span><span>${Number(inertial.ixz ?? 0).toFixed(4)}</span></div>
+            <div class="inertia-cell"><span>iyz</span><span>${Number(inertial.iyz ?? 0).toFixed(4)}</span></div>
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">Fricción (μ₁ / μ₂)</span>
+            <input id="insp-mu" class="insp-input" type="number" step="0.05" min="0" value="${col.mu1 ?? 0.7}" />
+          </div>
+        </div>
+      `;
+    }
+
+    // LIGHT INSPECTOR CARD
+    if (node.type === "light") {
+      const l = node.light || {};
+      const hexLight = rgbaToHex(l.diffuse);
+      html += `
+        <div class="insp-card">
+          <div class="insp-card-title">Propiedades de Luz (${(l.light_type || "point").toUpperCase()})</div>
+          <div class="insp-row">
+            <span class="insp-label">Color</span>
+            <input id="insp-lcolor" type="color" value="${hexLight}" style="width:70px;height:26px;border:none;background:transparent;" />
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">Intensidad</span>
+            <input id="insp-lintensity" class="insp-input" type="number" step="0.1" min="0" value="${l.intensity ?? 1.0}" />
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">Sombras</span>
+            <input id="insp-lshadows" type="checkbox" ${l.cast_shadows !== false ? "checked" : ""} />
+          </div>
+        </div>
+      `;
+    }
+
+    container.innerHTML = html;
+    this._bindInspectorInputs(node);
+  }
+
+  _bindInspectorInputs(node) {
+    const bindChange = (id, callback) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("change", () => callback(el));
+    };
+
+    bindChange("insp-name", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { name: el.value },
+        label: `Rename to '${el.value}'`,
+      });
+    });
+
+    bindChange("insp-static", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { static: el.checked },
+        label: `Set static=${el.checked} on '${node.name}'`,
+      });
+    });
+
+    // Pose & Scale inputs
+    const updatePoseFromInputs = () => {
+      const px = parseFloat(document.getElementById("insp-px")?.value || 0);
+      const py = parseFloat(document.getElementById("insp-py")?.value || 0);
+      const pz = parseFloat(document.getElementById("insp-pz")?.value || 0);
+      const factor = this.showAnglesInDegrees ? DEG2RAD : 1.0;
+      const rr = parseFloat(document.getElementById("insp-rr")?.value || 0) * factor;
+      const rp = parseFloat(document.getElementById("insp-rp")?.value || 0) * factor;
+      const ry = parseFloat(document.getElementById("insp-ry")?.value || 0) * factor;
+      const sx = Math.max(0.01, parseFloat(document.getElementById("insp-sx")?.value || 1));
+      const sy = Math.max(0.01, parseFloat(document.getElementById("insp-sy")?.value || 1));
+      const sz = Math.max(0.01, parseFloat(document.getElementById("insp-sz")?.value || 1));
+
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: {
+          pose: [px, py, pz, rr, rp, ry],
+          scale: [sx, sy, sz],
+        },
+        label: `Update Pose of '${node.name}'`,
+      });
+    };
+
+    ["insp-px", "insp-py", "insp-pz", "insp-rr", "insp-rp", "insp-ry", "insp-sx", "insp-sy", "insp-sz"].forEach(
+      (id) => bindChange(id, updatePoseFromInputs)
+    );
+
+    // Geometry dimensions
+    ["insp-gdx", "insp-gdy", "insp-gdz"].forEach((id) => {
+      bindChange(id, () => {
+        const dx = Math.max(0.01, parseFloat(document.getElementById("insp-gdx")?.value || 1));
+        const dy = Math.max(0.01, parseFloat(document.getElementById("insp-gdy")?.value || 1));
+        const dz = Math.max(0.01, parseFloat(document.getElementById("insp-gdz")?.value || 1));
+        this.sendCommand({
+          type: "update_node",
+          node_id: node.id,
+          patch: { geometry: { size: [dx, dy, dz] } },
+          label: `Resize Box '${node.name}'`,
+        });
+      });
+    });
+
+    bindChange("insp-grad", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { geometry: { radius: Math.max(0.01, parseFloat(el.value || 0.5)) } },
+        label: `Change Radius of '${node.name}'`,
+      });
+    });
+
+    bindChange("insp-glen", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { geometry: { length: Math.max(0.01, parseFloat(el.value || 1.0)) } },
+        label: `Change Length of '${node.name}'`,
+      });
+    });
+
+    bindChange("insp-gplane", (el) => {
+      const s = Math.max(1, parseFloat(el.value || 100));
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { geometry: { size: [s, s] } },
+        label: `Resize Ground Plane`,
+      });
+    });
+
+    bindChange("insp-color", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { material: { color: hexToRgba(el.value) } },
+        label: `Change Color of '${node.name}'`,
+      });
+    });
+
+    // Parametric archetype parameter inputs
+    document.querySelectorAll(".insp-arch-param").forEach((inputEl) => {
+      inputEl.addEventListener("change", () => {
+        const key = inputEl.getAttribute("data-param-key");
+        const isInt = key === "steps" || key === "shelves";
+        const val = isInt
+          ? Math.max(1, parseInt(inputEl.value || "2", 10))
+          : Math.max(0.02, parseFloat(inputEl.value || "0.5"));
+        this.sendCommand({
+          type: "update_node",
+          node_id: node.id,
+          patch: { archetype_params: { [key]: val } },
+          label: `Update ${key}=${val} on '${node.name}'`,
+        });
+      });
+    });
+
+    const btnExplode = document.getElementById("btn-explode-composite");
+    if (btnExplode) {
+      btnExplode.addEventListener("click", () => {
+        this.sendCommand({
+          type: "explode_composite",
+          node_id: node.id,
+        });
+      });
+    }
+
+    const btnSavePrefab = document.getElementById("btn-save-custom-prefab");
+    if (btnSavePrefab) {
+      btnSavePrefab.addEventListener("click", async () => {
+        const customLabel = `⭐ ${node.name}`;
+        const res = await fetch("/api/save_custom_object", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ node_id: node.id, label: customLabel }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          this._applyBackendPayload(data);
+          this._setStatus(`Guardado '${customLabel}' en Objetos Personalizados`);
+        }
+      });
+    }
+
+    bindChange("insp-mesh-unit", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { mesh: { unit: el.value } },
+        label: `Change Mesh Unit to '${el.value}' on '${node.name}'`,
+      });
+    });
+
+    bindChange("insp-mesh-axis", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { mesh: { up_axis: el.value } },
+        label: `Change Mesh Axis to '${el.value}' on '${node.name}'`,
+      });
+    });
+
+    bindChange("insp-col-strategy", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { collision: { strategy: el.value } },
+        label: `Set Collision Strategy '${el.value}' on '${node.name}'`,
+      });
+    });
+
+    bindChange("insp-inc-uri", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { include: { uri: el.value.trim() } },
+        label: `Update Include URI on '${node.name}'`,
+      });
+    });
+
+    bindChange("insp-mat-preset", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { inertial: { mode: "auto", material_preset: el.value } },
+        label: `Set Material Preset '${el.value}' on '${node.name}'`,
+      });
+    });
+
+    bindChange("insp-mass", (el) => {
+      const m = Math.max(0.001, parseFloat(el.value || 1.0));
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { inertial: { mode: "manual_mass", mass: m } },
+        label: `Set Mass=${m}kg on '${node.name}'`,
+      });
+    });
+
+    bindChange("insp-mu", (el) => {
+      const mu = Math.max(0, parseFloat(el.value || 0.7));
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { collision: { mu1: mu, mu2: mu } },
+        label: `Set Friction=${mu} on '${node.name}'`,
+      });
+    });
+
+    // Light controls
+    bindChange("insp-lcolor", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { light: { diffuse: hexToRgba(el.value) } },
+        label: `Change Light Color '${node.name}'`,
+      });
+    });
+
+    bindChange("insp-lintensity", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { light: { intensity: Math.max(0, parseFloat(el.value || 1.0)) } },
+        label: `Change Light Intensity '${node.name}'`,
+      });
+    });
+
+    bindChange("insp-lshadows", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { light: { cast_shadows: el.checked } },
+        label: `Toggle Light Shadows '${node.name}'`,
+      });
+    });
+  }
+
+  // ===========================================================================
+  // 6. DOCTOR GAZEBO DIAGNOSTIC PANEL & LIVE SDF XML SPLIT-VIEW
+  // ===========================================================================
+  _renderDoctorGazebo() {
+    const badge = document.getElementById("btn-doctor-badge");
+    const listEl = document.getElementById("doctor-alerts-list");
+    listEl.innerHTML = "";
+
+    const errors = this.doctorAlerts.filter((a) => a.severity === "ERROR");
+    const warnings = this.doctorAlerts.filter((a) => a.severity === "WARNING");
+
+    if (errors.length === 0 && warnings.length === 0) {
+      badge.className = "doctor-badge ok";
+      badge.textContent = "✓ Doctor Gazebo: OK";
+      listEl.innerHTML = `<div class="doctor-item ok">✓ Todas las inercias, masas y poses son físicamente válidas.</div>`;
+      return;
+    }
+
+    if (errors.length > 0) {
+      badge.className = "doctor-badge err";
+      badge.textContent = `⚠ Doctor Gazebo: ${errors.length} Error(es)`;
+    } else {
+      badge.className = "doctor-badge warn";
+      badge.textContent = `⚡ Doctor Gazebo: ${warnings.length} Aviso(s)`;
+    }
+
+    for (const alert of this.doctorAlerts) {
+      const div = document.createElement("div");
+      div.className = `doctor-item ${alert.severity}`;
+      div.textContent = alert.message;
+      if (alert.node_id) {
+        div.addEventListener("click", () => this.selectNode(alert.node_id));
+      }
+      listEl.appendChild(div);
+    }
+  }
+
+  _renderLiveSdfXml() {
+    const container = document.getElementById("xml-code-container");
+    if (!container) return;
+    container.innerHTML = "";
+
+    const lines = this.sdfPreview.split("\n");
+    const range = this.selectedNodeId ? this.sdfLineMap[this.selectedNodeId] : null;
+
+    lines.forEach((lineText, idx) => {
+      const ln = idx + 1;
+      const row = document.createElement("div");
+      const isHighlighted = range && ln >= range.start_line && ln <= range.end_line;
+      row.className = "xml-line" + (isHighlighted ? " highlighted" : "");
+      row.dataset.line = String(ln);
+
+      const lnSpan = document.createElement("span");
+      lnSpan.className = "xml-ln";
+      lnSpan.textContent = String(ln);
+
+      const txtSpan = document.createElement("span");
+      txtSpan.className = "xml-text";
+      txtSpan.textContent = lineText;
+
+      row.appendChild(lnSpan);
+      row.appendChild(txtSpan);
+      container.appendChild(row);
+    });
+
+    this._highlightSelectedNodeInXml();
+  }
+
+  _highlightSelectedNodeInXml() {
+    const container = document.getElementById("xml-code-container");
+    if (!container) return;
+    const range = this.selectedNodeId ? this.sdfLineMap[this.selectedNodeId] : null;
+
+    container.querySelectorAll(".xml-line").forEach((el) => {
+      const ln = parseInt(el.dataset.line || "0", 10);
+      if (range && ln >= range.start_line && ln <= range.end_line) {
+        el.classList.add("highlighted");
+      } else {
+        el.classList.remove("highlighted");
+      }
+    });
+
+    if (range) {
+      const firstLine = container.querySelector(`.xml-line[data-line="${range.start_line}"]`);
+      if (firstLine) {
+        firstLine.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }
+  }
+
+  // ===========================================================================
+  // 7. TOOLBAR EVENTS & KEYBOARD SHORTCUTS (BLENDER / GAZEBO ERGONOMICS)
+  // ===========================================================================
+  _bindToolbarAndShortcuts() {
+    // Undo / Redo
+    document.getElementById("btn-undo").addEventListener("click", () => this.triggerUndo());
+    document.getElementById("btn-redo").addEventListener("click", () => this.triggerRedo());
+
+    // Transform Gizmo Modes (G, R, S)
+    const setGizmoMode = (mode) => {
+      this.transformControls.setMode(mode);
+      document
+        .getElementById("btn-mode-translate")
+        .classList.toggle("active", mode === "translate");
+      document.getElementById("btn-mode-rotate").classList.toggle("active", mode === "rotate");
+      document.getElementById("btn-mode-scale").classList.toggle("active", mode === "scale");
+      this._setStatus(`Modo Gizmo: ${mode.toUpperCase()}`);
+    };
+
+    document
+      .getElementById("btn-mode-translate")
+      .addEventListener("click", () => setGizmoMode("translate"));
+    document
+      .getElementById("btn-mode-rotate")
+      .addEventListener("click", () => setGizmoMode("rotate"));
+    document
+      .getElementById("btn-mode-scale")
+      .addEventListener("click", () => setGizmoMode("scale"));
+
+    // Coordinate Space Toggle (World vs Local)
+    document.getElementById("btn-space-toggle").addEventListener("click", (e) => {
+      const next = this.transformControls.space === "world" ? "local" : "world";
+      this.transformControls.setSpace(next);
+      e.currentTarget.textContent = next === "world" ? "🌐 World" : "🧭 Local";
+      this._setStatus(`Espacio de transformación: ${next.toUpperCase()}`);
+    });
+
+    // Smart Drop to Ground / Surface Below (Space / End)
+    const triggerDropToGround = () => {
+      if (!this.selectedNodeId) return;
+      this.sendCommand({
+        type: "drop_to_ground",
+        node_id: this.selectedNodeId,
+        ground_z: 0.0,
+      });
+      this._setStatus("Objeto apoyado sobre superficie inferior o suelo Z = 0 m");
+    };
+    document.getElementById("btn-drop-ground").addEventListener("click", triggerDropToGround);
+
+    // Surface-to-Surface Snap (V)
+    const triggerSnapNeighbor = () => {
+      if (!this.selectedNodeId) return;
+      this.sendCommand({
+        type: "snap_to_neighbor",
+        node_id: this.selectedNodeId,
+        snap_rotation: true,
+      });
+      this._setStatus("🧲 Objeto acoplado cara-a-cara con el vecino más cercano");
+    };
+    const btnSnapNeighbor = document.getElementById("btn-snap-neighbor");
+    if (btnSnapNeighbor) btnSnapNeighbor.addEventListener("click", triggerSnapNeighbor);
+
+    // 3D Ruler & Angle Protractor (M) + 2D->3D Floorplan Tracer
+    const setViewportTool = (toolName) => {
+      this.activeViewportTool = this.activeViewportTool === toolName ? null : toolName;
+      this.rulerPoints = [];
+      this.floorplanPoints = [];
+      document
+        .getElementById("btn-tool-ruler")
+        ?.classList.toggle("active", this.activeViewportTool === "ruler");
+      document
+        .getElementById("btn-tool-floorplan")
+        ?.classList.toggle("active", this.activeViewportTool === "floorplan");
+      if (this.activeViewportTool === "ruler") {
+        this._setStatus("📏 Modo Regla 3D activo: haz clic en 2 puntos del suelo para medir distancia y ángulo.");
+      } else if (this.activeViewportTool === "floorplan") {
+        this._setStatus("✏ Modo Trazador 2D→3D activo: haz clic en los vértices del plano y pulsa Enter para extruir muros.");
+      } else {
+        this._setStatus("Herramienta interactiva desactivada");
+      }
+    };
+    document
+      .getElementById("btn-tool-ruler")
+      ?.addEventListener("click", () => setViewportTool("ruler"));
+    document
+      .getElementById("btn-tool-floorplan")
+      ?.addEventListener("click", () => setViewportTool("floorplan"));
+
+    // Grid & Angle Snapping
+    document.getElementById("grid-snap-select").addEventListener("change", (e) => {
+      const val = parseFloat(e.target.value);
+      this.transformControls.setTranslationSnap(val > 0 ? val : null);
+    });
+    document.getElementById("angle-snap-select").addEventListener("change", (e) => {
+      const deg = parseFloat(e.target.value);
+      this.transformControls.setRotationSnap(deg > 0 ? deg * DEG2RAD : null);
+    });
+
+    // Camera Perspective vs Orthographic Top-Down 2D (Numpad 7)
+    const toggleCameraView = () => {
+      const btn = document.getElementById("btn-cam-view");
+      if (this.cameraMode === "perspective") {
+        this.cameraMode = "ortho_top";
+        this.activeCamera = this.orthoCamera;
+        this.orthoCamera.position.set(0, 0, 50);
+        this.orthoCamera.lookAt(0, 0, 0);
+        this.orbitControls.object = this.orthoCamera;
+        this.orbitControls.enableRotate = false;
+        this.transformControls.camera = this.orthoCamera;
+        btn.textContent = "📐 2D Cenital";
+        btn.classList.add("active");
+        this._setStatus("Vista Ortográfica Cenital 2D (Top-Down XY)");
+      } else {
+        this.cameraMode = "perspective";
+        this.activeCamera = this.perspCamera;
+        this.orbitControls.object = this.perspCamera;
+        this.orbitControls.enableRotate = true;
+        this.transformControls.camera = this.perspCamera;
+        btn.textContent = "🎥 3D Persp";
+        btn.classList.remove("active");
+        this._setStatus("Vista en Perspectiva 3D (Z-Up)");
+      }
+      this.orbitControls.update();
+    };
+    document.getElementById("btn-cam-view").addEventListener("click", toggleCameraView);
+
+    // Visual Debug Layers
+    document.getElementById("btn-debug-col").addEventListener("click", (e) => {
+      this.debugLayers.collision = !this.debugLayers.collision;
+      e.currentTarget.classList.toggle("active", this.debugLayers.collision);
+      this._rebuild3DSceneFromGraph();
+    });
+    document.getElementById("btn-debug-inertia").addEventListener("click", (e) => {
+      this.debugLayers.inertia = !this.debugLayers.inertia;
+      e.currentTarget.classList.toggle("active", this.debugLayers.inertia);
+      this._rebuild3DSceneFromGraph();
+    });
+    document.getElementById("btn-debug-tf").addEventListener("click", (e) => {
+      this.debugLayers.tf = !this.debugLayers.tf;
+      e.currentTarget.classList.toggle("active", this.debugLayers.tf);
+      this._rebuild3DSceneFromGraph();
+    });
+
+    // World Name & SDF Target Version
+    document.getElementById("world-name-input").addEventListener("change", (e) => {
+      this.sendCommand({
+        type: "update_world",
+        patch: { name: e.target.value.trim() || "custebo_world" },
+      });
+    });
+    document.getElementById("sdf-target-select").addEventListener("change", (e) => {
+      this.sendCommand({
+        type: "update_world",
+        patch: { sdf_target: e.target.value },
+      });
+    });
+
+    // Angle unit display toggle (Degrees vs Radians)
+    document.getElementById("chk-angles-deg").addEventListener("change", (e) => {
+      this.showAnglesInDegrees = e.target.checked;
+      this._renderInspector();
+    });
+
+    // Creation Palette Buttons
+    document.querySelectorAll("[data-add-archetype]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const archetype = btn.getAttribute("data-add-archetype");
+        this.sendCommand({ type: "add_archetype", archetype });
+      });
+    });
+    document.querySelectorAll("[data-add-shape]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const shape = btn.getAttribute("data-add-shape");
+        this.sendCommand({ type: "add_primitive", shape, name: shape });
+      });
+    });
+    document.querySelectorAll("[data-add-light]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const lightType = btn.getAttribute("data-add-light");
+        this.sendCommand({ type: "add_light", light_type: lightType });
+      });
+    });
+
+    // Duplicate & Delete Selected
+    const duplicateSelected = () => {
+      if (!this.selectedNodeId) return;
+      this.sendCommand({ type: "duplicate_node", node_id: this.selectedNodeId });
+    };
+    const deleteSelected = () => {
+      if (!this.selectedNodeId) return;
+      this.sendCommand({ type: "delete_nodes", node_ids: [this.selectedNodeId] });
+    };
+    document.getElementById("btn-dup-selected").addEventListener("click", duplicateSelected);
+    document.getElementById("btn-del-selected").addEventListener("click", deleteSelected);
+
+    // Live SDF XML Split-View Toggle & Actions
+    document.getElementById("btn-toggle-xml").addEventListener("click", (e) => {
+      const panel = document.getElementById("xml-split-panel");
+      panel.classList.toggle("hidden");
+      e.currentTarget.classList.toggle("active", !panel.classList.contains("hidden"));
+      setTimeout(() => this._onResize(), 50);
+    });
+
+    document.getElementById("btn-copy-sdf").addEventListener("click", () => {
+      navigator.clipboard.writeText(this.sdfPreview);
+      this._setStatus("Código XML/SDF copiado al portapapeles");
+    });
+
+    document.getElementById("btn-verify-sdf").addEventListener("click", async () => {
+      this._setStatus("Verificando SDF con validador CLI y `gz sdf -k`...");
+      const res = await fetch("/api/validate_sdf", { method: "POST" });
+      const data = await res.json();
+      if (data.is_valid) {
+        const gzNote = data.gz_cli_checked ? " + `gz sdf -k` oficial" : "";
+        this._setStatus(`✓ SDF 100% VÁLIDO (Validador Custebo${gzNote})`);
+      } else {
+        this._setStatus(`⚠ Errores en SDF: ${data.issues.map((i) => i.message).join("; ")}`);
+      }
+    });
+
+    // Save Project (.gproj.json)
+    document.getElementById("btn-save-proj").addEventListener("click", async () => {
+      const res = await fetch("/api/save_project", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        // Also trigger browser download for convenience
+        const blob = new Blob([JSON.stringify(data.scene_graph, null, 2)], {
+          type: "application/json",
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${this.sceneGraph.world.name || "custebo_world"}.gproj.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        this._setStatus(`Proyecto guardado en ${data.saved_path}`);
+      }
+    });
+
+    // Load Project (.gproj.json)
+    const fileInput = document.getElementById("file-load-input");
+    document.getElementById("btn-load-proj").addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const res = await fetch("/api/load_project", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scene_graph: parsed }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        this._applyBackendPayload(data);
+        this._setStatus(`Proyecto '${file.name}' cargado correctamente`);
+      }
+    });
+
+    // Round-Trip Import .SDF / .WORLD
+    const sdfInput = document.getElementById("file-sdf-input");
+    document.getElementById("btn-import-sdf").addEventListener("click", () => sdfInput.click());
+    sdfInput.addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const xmlText = await file.text();
+      const res = await fetch("/api/import_sdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ xml_content: xmlText }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        this._applyBackendPayload(data);
+        this._setStatus(`Mundo SDF '${file.name}' importado y limpiado con éxito`);
+      } else {
+        this._setStatus(`Error al importar SDF: ${data.error}`);
+      }
+    });
+
+    // Custom 3D Mesh Upload Assistant ("➕ Importar 3D" in Objetos Personalizados)
+    const meshDrawer = document.getElementById("mesh-import-drawer");
+    document.getElementById("btn-open-mesh-import").addEventListener("click", () => {
+      meshDrawer.classList.toggle("hidden");
+    });
+
+    const meshFileInput = document.getElementById("file-mesh-input");
+    document.getElementById("btn-pick-mesh-file").addEventListener("click", () => {
+      meshFileInput.click();
+    });
+
+    meshFileInput.addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = "";
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const b64 = btoa(binary);
+      const unit = document.getElementById("import-mesh-unit").value;
+      const upAxis = document.getElementById("import-mesh-axis").value;
+
+      this._setStatus(`Importando y calculando inercia de '${file.name}'...`);
+      const res = await fetch("/api/upload_custom_mesh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: file.name,
+          content_base64: b64,
+          unit,
+          up_axis: upAxis,
+          material_preset: "aluminum",
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        if (data.selected_node_id) this.selectedNodeId = data.selected_node_id;
+        this._applyBackendPayload(data);
+        meshDrawer.classList.add("hidden");
+        this._setStatus(`Malla '${file.name}' añadida a Objetos Personalizados e insertada en escena`);
+      } else {
+        this._setStatus(`Error importando malla: ${data.error}`);
+      }
+    });
+
+    // Gazebo Fuel & ROS 2 Workspace Browser Drawer
+    const fuelDrawer = document.getElementById("fuel-browser-drawer");
+    const runFuelSearch = async () => {
+      const q = document.getElementById("fuel-search-input").value.trim();
+      const listEl = document.getElementById("fuel-results-list");
+      listEl.innerHTML = `<div style="font-size:11px;color:var(--text-muted);">Buscando modelos...</div>`;
+      const res = await fetch(`/api/fuel_search?q=${encodeURIComponent(q)}`);
+      const data = await res.json();
+      if (!data.ok) return;
+      listEl.innerHTML = "";
+      for (const m of data.fuel_models || []) {
+        const row = document.createElement("div");
+        row.className = "custom-obj-row";
+        row.innerHTML = `<span class="custom-obj-title">☁ ${m.name}</span>`;
+        row.title = `URI: ${m.uri}`;
+        row.addEventListener("click", () => {
+          this.sendCommand({
+            type: "add_fuel_include",
+            name: m.model_name.replace(/\s+/g, "_").toLowerCase(),
+            uri: m.uri,
+            size: m.size,
+            color: m.color,
+            static: m.static,
+            proxy_archetype: m.proxy_archetype,
+          });
+          this._setStatus(`Añadido <include> de Gazebo Fuel: ${m.model_name}`);
+        });
+        listEl.appendChild(row);
+      }
+      for (const rm of (data.ros_models || []).slice(0, 6)) {
+        const row = document.createElement("div");
+        row.className = "custom-obj-row";
+        row.innerHTML = `<span class="custom-obj-title">📦 [ROS 2] ${rm.name}</span>`;
+        row.title = `${rm.uri} (${rm.source_path})`;
+        row.addEventListener("click", () => {
+          this.sendCommand({
+            type: "add_fuel_include",
+            name: rm.name.replace(/\s+/g, "_").toLowerCase(),
+            uri: rm.uri,
+            size: [1.0, 1.0, 1.0],
+            color: [0.25, 0.70, 0.55, 1.0],
+            static: true,
+          });
+          this._setStatus(`Añadido modelo local ROS 2: ${rm.uri}`);
+        });
+        listEl.appendChild(row);
+      }
+    };
+
+    document.getElementById("btn-toggle-fuel").addEventListener("click", () => {
+      fuelDrawer.classList.toggle("hidden");
+      if (!fuelDrawer.classList.contains("hidden")) {
+        runFuelSearch();
+      }
+    });
+    document.getElementById("btn-fuel-search-go").addEventListener("click", runFuelSearch);
+
+    // Phase 3: Procedural & CAD Tools Drawer
+    const procDrawer = document.getElementById("procedural-drawer");
+    document.getElementById("btn-toggle-procedural")?.addEventListener("click", () => {
+      procDrawer?.classList.toggle("hidden");
+    });
+
+    // 1. Grid Array Cloner
+    document.getElementById("btn-run-grid-array")?.addEventListener("click", () => {
+      if (!this.selectedNodeId) {
+        this._setStatus("⚠ Selecciona primero un objeto para clonarlo en matriz 3D");
+        return;
+      }
+      const nx = parseInt(document.getElementById("arr-nx")?.value || "3", 10);
+      const ny = parseInt(document.getElementById("arr-ny")?.value || "2", 10);
+      const nz = parseInt(document.getElementById("arr-nz")?.value || "1", 10);
+      const sx = parseFloat(document.getElementById("arr-sx")?.value || "2.5");
+      const sy = parseFloat(document.getElementById("arr-sy")?.value || "2.5");
+      const sz = parseFloat(document.getElementById("arr-sz")?.value || "2.0");
+      this.sendCommand({
+        type: "grid_array_clone",
+        node_id: this.selectedNodeId,
+        count_x: nx,
+        count_y: ny,
+        count_z: nz,
+        spacing_x: sx,
+        spacing_y: sy,
+        spacing_z: sz,
+      });
+      this._setStatus(`🔢 Creada matriz procedural ${nx}×${ny}×${nz}`);
+    });
+
+    // 2. Spline / Bezier Cloner
+    document.getElementById("btn-run-spline")?.addEventListener("click", () => {
+      if (!this.selectedNodeId) {
+        this._setStatus("⚠ Selecciona primero un objeto (valla, cono, bolardo) para clonar en curva");
+        return;
+      }
+      const count = parseInt(document.getElementById("spline-count")?.value || "8", 10);
+      const radius = parseFloat(document.getElementById("spline-radius")?.value || "10.0");
+      const node = this._getSelectedNode();
+      const [x0, y0] = node ? node.pose : [0, 0];
+      const controlPoints = [
+        [x0, y0],
+        [x0 + radius * 0.5, y0 + radius * 0.8],
+        [x0 + radius * 1.3, y0 - radius * 0.6],
+        [x0 + radius * 2.0, y0],
+      ];
+      this.sendCommand({
+        type: "spline_clone",
+        node_id: this.selectedNodeId,
+        control_points: controlPoints,
+        count,
+        align_tangent: true,
+      });
+      this._setStatus(`〰 Creados ${count} clones orientados a lo largo de curva Bézier`);
+    });
+
+    // 3. Scatter Brush (Random distribution with AABB anti-overlap)
+    document.getElementById("btn-run-scatter")?.addEventListener("click", () => {
+      const archetype = document.getElementById("scatter-arch")?.value || "cardboard_box";
+      const count = parseInt(document.getElementById("scatter-count")?.value || "12", 10);
+      const radius = parseFloat(document.getElementById("scatter-radius")?.value || "8.0");
+      const centerNode = this._getSelectedNode();
+      const cx = centerNode ? centerNode.pose[0] : 0.0;
+      const cy = centerNode ? centerNode.pose[1] : 0.0;
+      this.sendCommand({
+        type: "scatter_brush",
+        archetype,
+        center_x: cx,
+        center_y: cy,
+        radius,
+        count,
+        min_clearance: 0.25,
+        seed: Math.floor(Math.random() * 100000),
+      });
+      this._setStatus(`🎲 Dispersados ${count} objetos (${archetype}) sin solapamientos`);
+    });
+
+    // 4. 2D Blueprint Overlay Image & ROS 2 .PGM -> 3D Wall Reconstruction
+    const fpImgInput = document.getElementById("file-floorplan-img");
+    document.getElementById("btn-load-floorplan-img")?.addEventListener("click", () => {
+      fpImgInput?.click();
+    });
+    fpImgInput?.addEventListener("change", (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+      new THREE.TextureLoader().load(url, (tex) => {
+        if (this.blueprintMesh) {
+          this.scene.remove(this.blueprintMesh);
+        }
+        const geo = new THREE.PlaneGeometry(30, 30);
+        const mat = new THREE.MeshBasicMaterial({
+          map: tex,
+          transparent: true,
+          opacity: 0.55,
+          depthWrite: false,
+        });
+        this.blueprintMesh = new THREE.Mesh(geo, mat);
+        this.blueprintMesh.position.set(0, 0, 0.005);
+        this.scene.add(this.blueprintMesh);
+        this._setStatus(`🖼 Plano '${file.name}' superpuesto en Z=0 (30×30m). Usa '✏ Trazar Muros' para calcarlo.`);
+      });
+    });
+
+    const pgmInput = document.getElementById("file-pgm-input");
+    document.getElementById("btn-import-pgm-walls")?.addEventListener("click", () => {
+      pgmInput?.click();
+    });
+    pgmInput?.addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = "";
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const res = await fetch("/api/import_pgm_map", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pgm_base64: btoa(binary),
+          resolution: 0.05,
+          wall_height: parseFloat(document.getElementById("fp-wall-height")?.value || "2.6"),
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        this._applyBackendPayload(data);
+        this._setStatus(`🗺 Mapa ROS '${file.name}' reconstruido en ${data.walls_created} muros 3D`);
+      } else {
+        this._setStatus(`Error importando PGM: ${data.error}`);
+      }
+    });
+
+    // 5. Parametric Outdoor Terrain Generator
+    document.getElementById("btn-gen-terrain")?.addEventListener("click", () => {
+      const preset = document.getElementById("terrain-preset")?.value || "hills";
+      const size = parseFloat(document.getElementById("terrain-size")?.value || "24");
+      const amp = parseFloat(document.getElementById("terrain-amp")?.value || "1.8");
+      this.sendCommand({
+        type: "generate_terrain",
+        preset,
+        width: size,
+        depth: size,
+        amplitude: amp,
+      });
+      this._setStatus(`⛰ Terreno '${preset}' (${size}×${size} m) generado e inyectado en escena`);
+    });
+
+    // 6. Multi-Object Alignment & Equidistant Distribution
+    const triggerDistribute = (axis) => {
+      if (!this.sceneGraph) return;
+      const movableIds = this.sceneGraph.nodes
+        .filter((n) => n.type !== "ground_plane" && n.type !== "light" && !n.locked)
+        .map((n) => n.id);
+      if (movableIds.length < 2) {
+        this._setStatus("⚠ Se necesitan al menos 2 objetos en la escena para distribuir");
+        return;
+      }
+      this.sendCommand({
+        type: "align_distribute",
+        node_ids: movableIds,
+        mode: `distribute_${axis}`,
+      });
+      this._setStatus(`📐 Objetos distribuidos equidistantemente en el eje ${axis.toUpperCase()}`);
+    };
+    document.getElementById("btn-distribute-x")?.addEventListener("click", () => triggerDistribute("x"));
+    document.getElementById("btn-distribute-y")?.addEventListener("click", () => triggerDistribute("y"));
+
+    // Export Clean SDF
+    document.getElementById("btn-export-sdf").addEventListener("click", async () => {
+      const res = await fetch("/api/export_sdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        const blob = new Blob([data.sdf_xml], { type: "application/xml" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${this.sceneGraph.world.name || "custebo_world"}.sdf`;
+        a.click();
+        URL.revokeObjectURL(url);
+        const vNote = data.validation?.gz_cli_checked ? " (Verificado con `gz sdf -k`)" : "";
+        this._setStatus(`Exportado a ${data.exported_path}${vNote}`);
+      }
+    });
+
+    // Play in Gazebo (`gz sim`)
+    document.getElementById("btn-play-gz").addEventListener("click", async () => {
+      const res = await fetch("/api/play_gazebo", { method: "POST" });
+      const data = await res.json();
+      if (data.ok) {
+        this._setStatus(`Lanzado Gazebo Harmonic con ${data.launched_file}`);
+      } else {
+        this._setStatus(`Aviso: ${data.error}`);
+      }
+    });
+
+    // Global Keyboard Shortcuts
+    window.addEventListener("keydown", (e) => {
+      const activeTag = document.activeElement?.tagName?.toLowerCase();
+      if (activeTag === "input" || activeTag === "select" || activeTag === "textarea") {
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) this.triggerRedo();
+        else this.triggerUndo();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        this.triggerRedo();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") {
+        e.preventDefault();
+        duplicateSelected();
+        return;
+      }
+
+      switch (e.key.toLowerCase()) {
+        case "g":
+          setGizmoMode("translate");
+          break;
+        case "r":
+          setGizmoMode("rotate");
+          break;
+        case "s":
+          setGizmoMode("scale");
+          break;
+        case "x":
+          document.getElementById("btn-space-toggle").click();
+          break;
+        case "v":
+          triggerSnapNeighbor();
+          break;
+        case "m":
+          setViewportTool("ruler");
+          break;
+        case "enter":
+          if (this.activeViewportTool === "floorplan" && (this.floorplanPoints || []).length >= 2) {
+            e.preventDefault();
+            const pts = [...this.floorplanPoints];
+            const h = parseFloat(document.getElementById("fp-wall-height")?.value || "2.6");
+            const t = parseFloat(document.getElementById("fp-wall-thick")?.value || "0.20");
+            this.sendCommand({
+              type: "extrude_floorplan",
+              points: pts,
+              height: h,
+              thickness: t,
+              closed: false,
+            });
+            this.floorplanPoints = [];
+            this.activeViewportTool = null;
+            document.getElementById("btn-tool-floorplan")?.classList.remove("active");
+            this._setStatus(`🧱 Extruidos ${pts.length - 1} muros 3D desde el trazado 2D`);
+          }
+          break;
+        case "escape":
+          if (this.activeViewportTool) {
+            setViewportTool(this.activeViewportTool);
+          }
+          break;
+        case " ":
+        case "end":
+          e.preventDefault();
+          triggerDropToGround();
+          break;
+        case "delete":
+        case "backspace":
+          e.preventDefault();
+          deleteSelected();
+          break;
+        case "7":
+          toggleCameraView();
+          break;
+      }
+    });
+  }
+
+  _setStatus(msg) {
+    const el = document.getElementById("hud-status-msg");
+    if (el) el.textContent = msg;
+  }
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  window.custeboApp = new CusteboStudioApp();
+});
+

@@ -1,0 +1,408 @@
+{
+  "schema_version": "1.0.0",
+  "world": {
+    "name": "custebo_world",
+    "sdf_target": "harmonic",
+    "sdf_version": "1.10",
+    "gravity": [
+      0.0,
+      0.0,
+      -9.81
+    ],
+    "physics": {
+      "name": "1ms",
+      "engine": "dart",
+      "max_step_size": 0.001,
+      "real_time_factor": 1.0
+    },
+    "ambient": [
+      0.4,
+      0.4,
+      0.4,
+      1.0
+    ],
+    "background": [
+      0.7,
+      0.75,
+      0.82,
+      1.0
+    ],
+    "plugins": {
+      "physics": true,
+      "user_commands": true,
+      "scene_broadcaster": true,
+      "sensors": true,
+      "imu": false,
+      "magnetometer": false,
+      "air_pressure": false,
+      "navsat": false
+    }
+  },
+  "folders": [
+    {
+      "id": "folder_env",
+      "name": "Environment & Lights",
+      "visible": true,
+      "locked": false
+    },
+    {
+      "id": "folder_arch",
+      "name": "Static Architecture",
+      "visible": true,
+      "locked": false
+    },
+    {
+      "id": "folder_props",
+      "name": "Models & Props",
+      "visible": true,
+      "locked": false
+    }
+  ],
+  "nodes": [
+    {
+      "id": "node_sun",
+      "name": "sun",
+      "type": "light",
+      "parent_id": null,
+      "folder_id": "folder_env",
+      "visible": true,
+      "locked": false,
+      "static": true,
+      "pose": [
+        0.0,
+        0.0,
+        10.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "light": {
+        "light_type": "directional",
+        "direction": [
+          -0.5,
+          0.1,
+          -0.9
+        ],
+        "diffuse": [
+          0.85,
+          0.85,
+          0.82,
+          1.0
+        ],
+        "specular": [
+          0.25,
+          0.25,
+          0.25,
+          1.0
+        ],
+        "intensity": 1.0,
+        "range": 20.0,
+        "cast_shadows": true,
+        "attenuation": {
+          "constant": 0.9,
+          "linear": 0.01,
+          "quadratic": 0.001
+        },
+        "spot": {
+          "inner_angle": 0.6,
+          "outer_angle": 1.0,
+          "falloff": 1.0
+        }
+      }
+    },
+    {
+      "id": "node_ground_plane",
+      "name": "ground_plane",
+      "type": "ground_plane",
+      "parent_id": null,
+      "folder_id": "folder_env",
+      "visible": true,
+      "locked": true,
+      "static": true,
+      "pose": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "geometry": {
+        "shape": "plane",
+        "size": [
+          100.0,
+          100.0
+        ],
+        "normal": [
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      "material": {
+        "color": [
+          0.42,
+          0.44,
+          0.47,
+          1.0
+        ],
+        "roughness": 0.85,
+        "metalness": 0.05
+      },
+      "collision": {
+        "enabled": true,
+        "strategy": "primitive",
+        "surface_preset": "warehouse_floor",
+        "mu1": 0.8,
+        "mu2": 0.8
+      },
+      "inertial": {
+        "mode": "auto",
+        "material_preset": "wood",
+        "center_of_mass": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mass": 650.0,
+        "ixx": 541666.672083,
+        "iyy": 541666.672083,
+        "izz": 1083333.333333,
+        "ixy": 0.0,
+        "ixz": 0.0,
+        "iyz": 0.0
+      }
+    },
+    {
+      "id": "node_starter_box",
+      "name": "wooden_crate",
+      "type": "primitive",
+      "parent_id": null,
+      "folder_id": "folder_props",
+      "visible": true,
+      "locked": false,
+      "static": false,
+      "pose": [
+        0.0,
+        0.0,
+        0.5,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "geometry": {
+        "shape": "box",
+        "size": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "radius": 0.5,
+        "length": 1.0
+      },
+      "material": {
+        "color": [
+          0.85,
+          0.55,
+          0.24,
+          1.0
+        ],
+        "roughness": 0.45,
+        "metalness": 0.1
+      },
+      "collision": {
+        "enabled": true,
+        "strategy": "primitive",
+        "surface_preset": "warehouse_floor",
+        "mu1": 0.7,
+        "mu2": 0.7
+      },
+      "inertial": {
+        "mode": "auto",
+        "material_preset": "wood",
+        "center_of_mass": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mass": 650.0,
+        "ixx": 108.333333,
+        "iyy": 108.333333,
+        "izz": 108.333333,
+        "ixy": 0.0,
+        "ixz": 0.0,
+        "iyz": 0.0
+      }
+    },
+    {
+      "id": "node_starter_pillar",
+      "name": "structural_pillar",
+      "type": "primitive",
+      "parent_id": null,
+      "folder_id": "folder_arch",
+      "visible": true,
+      "locked": false,
+      "static": true,
+      "pose": [
+        -2.5,
+        2.0,
+        1.25,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "geometry": {
+        "shape": "cylinder",
+        "size": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "radius": 0.35,
+        "length": 2.5
+      },
+      "material": {
+        "color": [
+          0.62,
+          0.66,
+          0.72,
+          1.0
+        ],
+        "roughness": 0.45,
+        "metalness": 0.1
+      },
+      "collision": {
+        "enabled": true,
+        "strategy": "primitive",
+        "surface_preset": "warehouse_floor",
+        "mu1": 0.7,
+        "mu2": 0.7
+      },
+      "inertial": {
+        "mode": "auto",
+        "material_preset": "concrete",
+        "center_of_mass": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mass": 2309.0706,
+        "ixx": 1273.356225,
+        "iyy": 1273.356225,
+        "izz": 141.430574,
+        "ixy": 0.0,
+        "ixz": 0.0,
+        "iyz": 0.0
+      }
+    },
+    {
+      "id": "node_starter_sphere",
+      "name": "steel_sphere",
+      "type": "primitive",
+      "parent_id": null,
+      "folder_id": "folder_props",
+      "visible": true,
+      "locked": false,
+      "static": false,
+      "pose": [
+        2.0,
+        -1.5,
+        0.4,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "geometry": {
+        "shape": "sphere",
+        "size": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "radius": 0.4,
+        "length": 1.0
+      },
+      "material": {
+        "color": [
+          0.23,
+          0.58,
+          0.92,
+          1.0
+        ],
+        "roughness": 0.45,
+        "metalness": 0.1
+      },
+      "collision": {
+        "enabled": true,
+        "strategy": "primitive",
+        "surface_preset": "warehouse_floor",
+        "mu1": 0.7,
+        "mu2": 0.7
+      },
+      "inertial": {
+        "mode": "auto",
+        "material_preset": "steel",
+        "center_of_mass": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mass": 2104.4482,
+        "ixx": 134.684685,
+        "iyy": 134.684685,
+        "izz": 134.684685,
+        "ixy": 0.0,
+        "ixz": 0.0,
+        "iyz": 0.0
+      }
+    }
+  ],
+  "reference_planes": [],
+  "robotics": {
+    "nav2_map_config": {
+      "z_min": 0.15,
+      "z_max": 0.6,
+      "resolution": 0.05,
+      "padding_m": 2.0
+    },
+    "spawn_poses": [],
+    "waypoint_graphs": []
+  },
+  "package_export": {
+    "package_name": "custebo_robot_worlds",
+    "maintainer": "Eugegeuge",
+    "maintainer_email": "hugosema.19@gmail.com",
+    "license": "Apache-2.0"
+  },
+  "metadata": {
+    "generator": "Custebo 3D World Editor",
+    "units_distance": "meters",
+    "units_angle": "radians",
+    "coordinate_frame": "ENU_Z_UP"
+  }
+}

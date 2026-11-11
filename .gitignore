@@ -1,0 +1,24 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+
+# Local Agent Governance, Internal Workflows & Draft Notes (kept local only)
+.agent/
+.cursor/
+ARCHITECTURE_RULES.md
+PROGRESS.md
+descripcion.txt
+fases.txt
+github.txt
+name.txt
+utilidades.txt
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+*.swp
+*~
