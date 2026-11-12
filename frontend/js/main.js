@@ -400,6 +400,19 @@ class CusteboStudioApp {
       this.nodeObjectMap.set(node.id, group);
     }
 
+    // Draw connected topological route line between visible Nav2 waypoints
+    const wpNodes = this.sceneGraph.nodes.filter(
+      (n) => n.type === "waypoint" && n.visible !== false
+    );
+    if (wpNodes.length >= 2) {
+      const wpPoints = wpNodes.map(
+        (w) => new THREE.Vector3(w.pose[0], w.pose[1], Math.max(0.06, w.pose[2]))
+      );
+      const routeGeom = new THREE.BufferGeometry().setFromPoints(wpPoints);
+      const routeMat = new THREE.LineBasicMaterial({ color: 0x06b6d4, linewidth: 2 });
+      this.nodesRootGroup.add(new THREE.Line(routeGeom, routeMat));
+    }
+
     if (this.selectedNodeId) {
       const selectedGroup = this.nodeObjectMap.get(this.selectedNodeId);
       const nodeData = this._getSelectedNode();
@@ -709,7 +722,7 @@ class CusteboStudioApp {
       group.add(lightObj);
 
       // Visual bulb gizmo so the user can click and move the light in 3D
-      const bulbGeom = new THREE.OctahedronGeometry(0.22, 1);
+      const bulbGeom = new THREE.OctahedronGeometry(0.35, 1);
       const bulbMat = new THREE.MeshBasicMaterial({
         color: node.id === this.selectedNodeId ? 0x60a5fa : 0xfacc15,
         wireframe: true,
@@ -718,8 +731,167 @@ class CusteboStudioApp {
       bulbMesh.userData.nodeId = node.id;
       group.add(bulbMesh);
 
+      if (ltype === "directional" || ltype === "spot") {
+        const dir = ldata.direction || [-0.5, 0.1, -0.9];
+        const rayGeom = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(0, 0, 0),
+          new THREE.Vector3(dir[0] * 2.5, dir[1] * 2.5, dir[2] * 2.5),
+        ]);
+        group.add(new THREE.Line(rayGeom, new THREE.LineBasicMaterial({ color: 0xfde047 })));
+      }
+
       if (this.debugLayers.tf) {
         group.add(new THREE.AxesHelper(0.5));
+      }
+      return group;
+    }
+
+    // Phase 4.2: Nav2 Waypoint Marker (Cyan disc + heading arrow)
+    if (node.type === "waypoint") {
+      const isSelected = node.id === this.selectedNodeId;
+      const mat = new THREE.MeshStandardMaterial({
+        color: isSelected ? 0x60a5fa : 0x06b6d4,
+        roughness: 0.3,
+        metalness: 0.2,
+      });
+      const discGeom = new THREE.CylinderGeometry(0.28, 0.28, 0.04, 24);
+      discGeom.rotateX(Math.PI / 2);
+      const disc = new THREE.Mesh(discGeom, mat);
+      disc.position.z = 0.02;
+      disc.userData.nodeId = node.id;
+      group.add(disc);
+
+      // Heading cone pointing along +X
+      const coneGeom = new THREE.ConeGeometry(0.12, 0.36, 16);
+      coneGeom.rotateZ(-Math.PI / 2);
+      const cone = new THREE.Mesh(coneGeom, mat);
+      cone.position.set(0.28, 0, 0.08);
+      cone.userData.nodeId = node.id;
+      group.add(cone);
+      return group;
+    }
+
+    // Phase 4.3: Robot Spawn Marker (Mobile robot chassis + wheels + forward arrow)
+    if (node.type === "robot_spawn") {
+      const isSelected = node.id === this.selectedNodeId;
+      const bodyMat = new THREE.MeshStandardMaterial({
+        color: isSelected ? 0x60a5fa : 0x10b981,
+        roughness: 0.35,
+        metalness: 0.3,
+      });
+      const baseMesh = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.38, 0.18), bodyMat);
+      baseMesh.position.z = 0.14;
+      baseMesh.userData.nodeId = node.id;
+      group.add(baseMesh);
+
+      const lidarTurret = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.07, 0.07, 0.08, 16).rotateX(Math.PI / 2),
+        new THREE.MeshStandardMaterial({ color: 0x1e293b })
+      );
+      lidarTurret.position.set(0.05, 0, 0.27);
+      lidarTurret.userData.nodeId = node.id;
+      group.add(lidarTurret);
+
+      const arrowCone = new THREE.Mesh(
+        new THREE.ConeGeometry(0.11, 0.32, 16).rotateZ(-Math.PI / 2),
+        new THREE.MeshBasicMaterial({ color: 0xfacc15 })
+      );
+      arrowCone.position.set(0.38, 0, 0.14);
+      arrowCone.userData.nodeId = node.id;
+      group.add(arrowCone);
+      return group;
+    }
+
+    // Phase 4.3: Static Environmental Sensor (RGB-D Camera or 2D/3D LiDAR with 3D Frustum)
+    if (node.type === "sensor") {
+      const sdata = node.sensor || {};
+      const stype = sdata.sensor_type || "camera_rgbd";
+      const fovDeg = Number(sdata.fov_deg ?? 75.0);
+      const rMax = Math.min(Number(sdata.range_max ?? 8.0), 12.0);
+      const isSelected = node.id === this.selectedNodeId;
+
+      const bodyMat = new THREE.MeshStandardMaterial({
+        color: isSelected ? 0x60a5fa : 0xa855f7,
+        roughness: 0.3,
+        metalness: 0.4,
+      });
+      const housing = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 0.14), bodyMat);
+      housing.userData.nodeId = node.id;
+      group.add(housing);
+
+      if (sdata.show_frustum !== false) {
+        if (stype === "camera_rgbd") {
+          const halfFov = (fovDeg * DEG2RAD) / 2;
+          const coneRadius = Math.tan(halfFov) * rMax * 0.45;
+          const coneLen = rMax * 0.45;
+          const frustumGeom = new THREE.ConeGeometry(coneRadius, coneLen, 4, 1, true);
+          frustumGeom.rotateY(Math.PI / 4);
+          frustumGeom.rotateZ(Math.PI / 2);
+          frustumGeom.translate(coneLen * 0.5, 0, 0);
+          const frustumMat = new THREE.MeshBasicMaterial({
+            color: 0xc084fc,
+            wireframe: true,
+            transparent: true,
+            opacity: 0.65,
+          });
+          group.add(new THREE.Mesh(frustumGeom, frustumMat));
+        } else {
+          // 2D / 3D LiDAR 360° scan volume preview
+          const scanHeight = stype === "lidar_3d" ? rMax * 0.35 : 0.04;
+          const lidarGeom = new THREE.CylinderGeometry(rMax * 0.4, rMax * 0.4, scanHeight, 28, 1, true);
+          lidarGeom.rotateX(Math.PI / 2);
+          const lidarMat = new THREE.MeshBasicMaterial({
+            color: 0x38bdf8,
+            wireframe: true,
+            transparent: true,
+            opacity: 0.5,
+          });
+          group.add(new THREE.Mesh(lidarGeom, lidarMat));
+        }
+      }
+      return group;
+    }
+
+    // Phase 4.4: Dynamic Pedestrian / Obstacle Actor (<actor>) + Trajectory Path
+    if (node.type === "actor") {
+      const isSelected = node.id === this.selectedNodeId;
+      const actorMat = new THREE.MeshStandardMaterial({
+        color: isSelected ? 0x60a5fa : 0xf97316,
+        roughness: 0.4,
+      });
+      // Humanoid torso + head representation
+      const torso = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.22, 0.18, 1.3, 16).rotateX(Math.PI / 2),
+        actorMat
+      );
+      torso.userData.nodeId = node.id;
+      group.add(torso);
+
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 16, 12), actorMat);
+      head.position.set(0, 0, 0.85);
+      head.userData.nodeId = node.id;
+      group.add(head);
+
+      // Draw trajectory waypoints in world space (compensated by group inverse position)
+      const wps = node.actor?.waypoints || [];
+      if (wps.length >= 2) {
+        const pts = wps.map(
+          (pt) =>
+            new THREE.Vector3(
+              Number(pt[0]) - pose[0],
+              Number(pt[1]) - pose[1],
+              0.08 - pose[2]
+            )
+        );
+        if (node.actor?.loop !== false) {
+          pts.push(pts[0].clone());
+        }
+        const pathGeom = new THREE.BufferGeometry().setFromPoints(pts);
+        const pathLine = new THREE.Line(
+          pathGeom,
+          new THREE.LineBasicMaterial({ color: 0xfb923c })
+        );
+        group.add(pathLine);
       }
       return group;
     }
@@ -736,12 +908,24 @@ class CusteboStudioApp {
 
     this.raycaster.setFromCamera(mouse, this.activeCamera);
 
-    // Interactive 3D Ruler or 2D->3D Floorplan Tracer mode
-    if (this.activeViewportTool === "ruler" || this.activeViewportTool === "floorplan") {
+    // Interactive 3D Ruler, 2D->3D Floorplan Tracer, or Nav2 Waypoint Dropper
+    if (
+      this.activeViewportTool === "ruler" ||
+      this.activeViewportTool === "floorplan" ||
+      this.activeViewportTool === "waypoint"
+    ) {
       const groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
       const hitPt = new THREE.Vector3();
       if (this.raycaster.ray.intersectPlane(groundPlane, hitPt)) {
         const pt = [Number(hitPt.x.toFixed(3)), Number(hitPt.y.toFixed(3)), 0.0];
+        if (this.activeViewportTool === "waypoint") {
+          this.sendCommand({
+            type: "add_waypoint",
+            pose: [pt[0], pt[1], 0.02, 0.0, 0.0, 0.0],
+          });
+          this._setStatus(`📍 Waypoint Nav2 colocado en [${pt[0]}, ${pt[1]}] m (Esc para salir)`);
+          return;
+        }
         if (this.activeViewportTool === "ruler") {
           this.rulerPoints = this.rulerPoints || [];
           this.rulerPoints.push(pt);
@@ -910,6 +1094,10 @@ class CusteboStudioApp {
           light: "💡",
           mesh: "🧩",
           include: "🌐",
+          waypoint: "📍",
+          robot_spawn: "🤖",
+          sensor: "📡",
+          actor: "🚶",
           primitive:
             archIcons[node.archetype] ||
             (node.geometry?.shape === "cylinder"
@@ -1257,6 +1445,7 @@ class CusteboStudioApp {
     // LIGHT INSPECTOR CARD
     if (node.type === "light") {
       const l = node.light || {};
+      const dir = l.direction || [-0.5, 0.1, -0.9];
       const hexLight = rgbaToHex(l.diffuse);
       html += `
         <div class="insp-card">
@@ -1272,6 +1461,96 @@ class CusteboStudioApp {
           <div class="insp-row">
             <span class="insp-label">Sombras</span>
             <input id="insp-lshadows" type="checkbox" ${l.cast_shadows !== false ? "checked" : ""} />
+          </div>
+          ${
+            l.light_type === "directional" || l.light_type === "spot"
+              ? `<span class="insp-label">Dirección del Rayo [dx, dy, dz]</span>
+                 <div class="vec3-grid">
+                   <div class="vec-field"><span class="vec-axis x">X</span><input id="insp-ldx" type="number" step="0.1" value="${dir[0]}" /></div>
+                   <div class="vec-field"><span class="vec-axis y">Y</span><input id="insp-ldy" type="number" step="0.1" value="${dir[1]}" /></div>
+                   <div class="vec-field"><span class="vec-axis z">Z</span><input id="insp-ldz" type="number" step="0.1" value="${dir[2]}" /></div>
+                 </div>`
+              : ""
+          }
+        </div>
+      `;
+    }
+
+    // PHASE 4.2: NAV2 WAYPOINT INSPECTOR CARD
+    if (node.type === "waypoint") {
+      const wp = node.waypoint || {};
+      html += `
+        <div class="insp-card">
+          <div class="insp-card-title">📍 Waypoint Nav2</div>
+          <div class="insp-row">
+            <span class="insp-label">Espera (dwell s)</span>
+            <input id="insp-wp-dwell" class="insp-input" type="number" step="0.5" min="0" value="${wp.dwell_time_s ?? 0.0}" />
+          </div>
+        </div>
+      `;
+    }
+
+    // PHASE 4.3: ROBOT SPAWN INSPECTOR CARD
+    if (node.type === "robot_spawn") {
+      const rs = node.robot_spawn || {};
+      html += `
+        <div class="insp-card">
+          <div class="insp-card-title">🤖 Spawn de Robot (ROS 2 Launch)</div>
+          <div class="insp-row">
+            <span class="insp-label">Modelo Robot</span>
+            <input id="insp-rs-model" class="insp-input" type="text" value="${rs.robot_model || "turtlebot4"}" />
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">Namespace</span>
+            <input id="insp-rs-ns" class="insp-input" type="text" value="${rs.robot_namespace || "robot1"}" />
+          </div>
+        </div>
+      `;
+    }
+
+    // PHASE 4.3: STATIC ENVIRONMENTAL SENSOR INSPECTOR CARD
+    if (node.type === "sensor") {
+      const s = node.sensor || {};
+      html += `
+        <div class="insp-card">
+          <div class="insp-card-title">📡 Sensor Fijo (${(s.sensor_type || "camera_rgbd").toUpperCase()})</div>
+          <div class="insp-row">
+            <span class="insp-label">Topic ROS/GZ</span>
+            <input id="insp-sen-topic" class="insp-input" type="text" value="${s.topic || "/world_sensors/sensor"}" />
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">Frecuencia (Hz)</span>
+            <input id="insp-sen-rate" class="insp-input" type="number" step="1" min="1" value="${s.update_rate ?? 15}" />
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">FOV (°)</span>
+            <input id="insp-sen-fov" class="insp-input" type="number" step="5" min="10" max="170" value="${s.fov_deg ?? 75}" />
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">Alcance Máx (m)</span>
+            <input id="insp-sen-range" class="insp-input" type="number" step="0.5" min="0.5" value="${s.range_max ?? 8.0}" />
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">Mostrar Frustum 3D</span>
+            <input id="insp-sen-frustum" type="checkbox" ${s.show_frustum !== false ? "checked" : ""} />
+          </div>
+        </div>
+      `;
+    }
+
+    // PHASE 4.4: DYNAMIC ACTOR (<actor>) INSPECTOR CARD
+    if (node.type === "actor") {
+      const a = node.actor || {};
+      html += `
+        <div class="insp-card">
+          <div class="insp-card-title">🚶 Actor Dinámico (&lt;actor&gt;)</div>
+          <div class="insp-row">
+            <span class="insp-label">Velocidad (m/s)</span>
+            <input id="insp-act-speed" class="insp-input" type="number" step="0.1" min="0.1" value="${a.speed_mps ?? 1.1}" />
+          </div>
+          <div class="insp-row">
+            <span class="insp-label">Bucle Continuo</span>
+            <input id="insp-act-loop" type="checkbox" ${a.loop !== false ? "checked" : ""} />
           </div>
         </div>
       `;
@@ -1519,6 +1798,92 @@ class CusteboStudioApp {
         node_id: node.id,
         patch: { light: { cast_shadows: el.checked } },
         label: `Toggle Light Shadows '${node.name}'`,
+      });
+    });
+
+    ["insp-ldx", "insp-ldy", "insp-ldz"].forEach((id) => {
+      bindChange(id, () => {
+        const dx = parseFloat(document.getElementById("insp-ldx")?.value || -0.5);
+        const dy = parseFloat(document.getElementById("insp-ldy")?.value || 0.1);
+        const dz = parseFloat(document.getElementById("insp-ldz")?.value || -0.9);
+        this.sendCommand({
+          type: "update_node",
+          node_id: node.id,
+          patch: { light: { direction: [dx, dy, dz] } },
+          label: `Update Light Direction '${node.name}'`,
+        });
+      });
+    });
+
+    // Phase 4 Inspector controls (Waypoint, Robot Spawn, Sensor, Actor)
+    bindChange("insp-wp-dwell", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { waypoint: { dwell_time_s: Math.max(0, parseFloat(el.value || 0)) } },
+      });
+    });
+    bindChange("insp-rs-model", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { robot_spawn: { robot_model: el.value.trim() || "turtlebot4" } },
+      });
+    });
+    bindChange("insp-rs-ns", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { robot_spawn: { robot_namespace: el.value.trim() || "robot1" } },
+      });
+    });
+    bindChange("insp-sen-topic", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { sensor: { topic: el.value.trim() || "/world_sensors/sensor" } },
+      });
+    });
+    bindChange("insp-sen-rate", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { sensor: { update_rate: Math.max(1, parseFloat(el.value || 15)) } },
+      });
+    });
+    bindChange("insp-sen-fov", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { sensor: { fov_deg: Math.max(10, Math.min(170, parseFloat(el.value || 75))) } },
+      });
+    });
+    bindChange("insp-sen-range", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { sensor: { range_max: Math.max(0.5, parseFloat(el.value || 8.0)) } },
+      });
+    });
+    bindChange("insp-sen-frustum", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { sensor: { show_frustum: el.checked } },
+      });
+    });
+    bindChange("insp-act-speed", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { actor: { speed_mps: Math.max(0.1, parseFloat(el.value || 1.1)) } },
+      });
+    });
+    bindChange("insp-act-loop", (el) => {
+      this.sendCommand({
+        type: "update_node",
+        node_id: node.id,
+        patch: { actor: { loop: el.checked } },
       });
     });
   }
@@ -2171,6 +2536,207 @@ class CusteboStudioApp {
     };
     document.getElementById("btn-distribute-x")?.addEventListener("click", () => triggerDistribute("x"));
     document.getElementById("btn-distribute-y")?.addEventListener("click", () => triggerDistribute("y"));
+
+    // =========================================================================
+    // Phase 4: ROS 2, Nav2, Sensors, Dynamic Actors & Parametric XACRO
+    // =========================================================================
+    const ros2Drawer = document.getElementById("ros2-drawer");
+    document.getElementById("btn-toggle-ros2")?.addEventListener("click", () => {
+      ros2Drawer?.classList.toggle("hidden");
+    });
+
+    // 4.1 Instant 2D Occupancy Map Generator (map.pgm + map.yaml) + Live Canvas Preview
+    const generateAndRenderNav2Map = async (triggerDownload = false) => {
+      const zMin = parseFloat(document.getElementById("nav2-zmin")?.value || "0.15");
+      const zMax = parseFloat(document.getElementById("nav2-zmax")?.value || "0.60");
+      const resVal = parseFloat(document.getElementById("nav2-res")?.value || "0.05");
+
+      this._setStatus(`🗺 Cortando mundo en Z=[${zMin}, ${zMax}] m (${resVal} m/px)...`);
+      const res = await fetch("/api/generate_nav2_map", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ z_min: zMin, z_max: zMax, resolution: resVal, padding_m: 2.0 }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        this._setStatus(`Error generando mapa 2D: ${data.error}`);
+        return;
+      }
+
+      // Decode PGM P5 binary to render on #nav2-map-canvas
+      const rawBin = atob(data.pgm_base64);
+      const bytes = new Uint8Array(rawBin.length);
+      for (let i = 0; i < rawBin.length; i++) bytes[i] = rawBin.charCodeAt(i);
+
+      const pixelOffset = bytes.length - data.width * data.height;
+      const canvas = document.getElementById("nav2-map-canvas");
+      const previewBox = document.getElementById("nav2-map-preview-box");
+      const metaEl = document.getElementById("nav2-map-meta");
+      if (canvas && pixelOffset >= 0) {
+        previewBox?.classList.remove("hidden");
+        canvas.width = data.width;
+        canvas.height = data.height;
+        const ctx = canvas.getContext("2d");
+        const imgData = ctx.createImageData(data.width, data.height);
+        for (let i = 0; i < data.width * data.height; i++) {
+          const val = bytes[pixelOffset + i];
+          imgData.data[i * 4 + 0] = val;
+          imgData.data[i * 4 + 1] = val;
+          imgData.data[i * 4 + 2] = val;
+          imgData.data[i * 4 + 3] = 255;
+        }
+        ctx.putImageData(imgData, 0, 0);
+        if (metaEl) {
+          metaEl.textContent = `${data.width}×${data.height} px | ${data.resolution} m/px | origen: [${data.origin[0]}, ${data.origin[1]}]`;
+        }
+      }
+
+      if (triggerDownload) {
+        // Download map.pgm
+        const pgmBlob = new Blob([bytes], { type: "image/x-portable-graymap" });
+        const pgmUrl = URL.createObjectURL(pgmBlob);
+        const a1 = document.createElement("a");
+        a1.href = pgmUrl;
+        a1.download = data.pgm_filename || "map.pgm";
+        a1.click();
+        URL.revokeObjectURL(pgmUrl);
+
+        // Download map.yaml
+        const yamlBlob = new Blob([data.yaml_content], { type: "text/yaml" });
+        const yamlUrl = URL.createObjectURL(yamlBlob);
+        const a2 = document.createElement("a");
+        a2.href = yamlUrl;
+        a2.download = data.yaml_filename || "map.yaml";
+        a2.click();
+        URL.revokeObjectURL(yamlUrl);
+        this._setStatus(`✓ Exportados ${data.pgm_filename} y ${data.yaml_filename} en exports/`);
+      } else {
+        this._setStatus(
+          `✓ Mapa 2D Nav2 generado (${data.width}×${data.height} px, ${data.obstacle_count} obstáculos en Z=[${zMin}, ${zMax}] m)`
+        );
+      }
+    };
+
+    document
+      .getElementById("btn-gen-nav2-map")
+      ?.addEventListener("click", () => generateAndRenderNav2Map(false));
+    document
+      .getElementById("btn-dl-nav2-map")
+      ?.addEventListener("click", () => generateAndRenderNav2Map(true));
+
+    // 4.2 Nav2 Waypoints & Topological Route Graph
+    document.getElementById("btn-tool-waypoint")?.addEventListener("click", (e) => {
+      this.activeViewportTool = this.activeViewportTool === "waypoint" ? null : "waypoint";
+      e.currentTarget.classList.toggle("active", this.activeViewportTool === "waypoint");
+      if (this.activeViewportTool === "waypoint") {
+        this._setStatus("📍 Modo Waypoint Nav2: haz clic en cualquier punto del suelo 3D para trazar la ruta.");
+      } else {
+        this._setStatus("Modo Waypoint Nav2 desactivado");
+      }
+    });
+
+    document.getElementById("btn-add-waypoint")?.addEventListener("click", () => {
+      this.sendCommand({ type: "add_waypoint" });
+      this._setStatus("📍 Waypoint Nav2 añadido a la ruta");
+    });
+
+    document.getElementById("btn-export-waypoints")?.addEventListener("click", async () => {
+      const res = await fetch("/api/export_nav2_waypoints", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        const blob = new Blob([data.yaml_content], { type: "text/yaml" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = data.filename || "nav2_waypoints.yaml";
+        a.click();
+        URL.revokeObjectURL(url);
+        this._setStatus(`✓ Exportado ${data.exported_path}`);
+      }
+    });
+
+    // 4.3 Robot Spawn Poses & Static Sensors (RGB-D / LiDAR) + ros_gz_bridge
+    document.getElementById("btn-add-robot-spawn")?.addEventListener("click", () => {
+      this.sendCommand({ type: "add_robot_spawn", robot_model: "turtlebot4" });
+      this._setStatus("🤖 Marcador de Spawn de Robot añadido");
+    });
+
+    document.getElementById("btn-add-sensor-rgbd")?.addEventListener("click", () => {
+      this.sendCommand({ type: "add_sensor", sensor_type: "camera_rgbd" });
+      this._setStatus("📷 Cámara RGB-D estática con Frustum 3D añadida");
+    });
+
+    document.getElementById("btn-add-sensor-lidar3d")?.addEventListener("click", () => {
+      this.sendCommand({ type: "add_sensor", sensor_type: "lidar_3d" });
+      this._setStatus("📡 Sensor LiDAR 3D estático añadido");
+    });
+
+    document.getElementById("btn-add-sensor-lidar2d")?.addEventListener("click", () => {
+      this.sendCommand({ type: "add_sensor", sensor_type: "lidar_2d" });
+      this._setStatus("📡 Sensor LiDAR 2D planar añadido");
+    });
+
+    document.getElementById("btn-export-bridge")?.addEventListener("click", async () => {
+      const res = await fetch("/api/export_ros_gz_bridge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        const blob = new Blob([data.yaml_content], { type: "text/yaml" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = data.filename || "ros_gz_bridge.yaml";
+        a.click();
+        URL.revokeObjectURL(url);
+        this._setStatus(`✓ Configuración ros_gz_bridge exportada en ${data.exported_path}`);
+      }
+    });
+
+    // 4.4 Dynamic Actor (<actor>) & World Plugins
+    document.getElementById("btn-add-actor")?.addEventListener("click", () => {
+      this.sendCommand({ type: "add_actor", speed_mps: 1.1, loop: true });
+      this._setStatus("🚶 Peatón dinámico (<actor>) con trayectoria en bucle añadido");
+    });
+
+    document.querySelectorAll(".world-plugin-chk").forEach((chk) => {
+      chk.addEventListener("change", () => {
+        const pluginKey = chk.getAttribute("data-plugin");
+        const curPlugins = { ...(this.sceneGraph?.world?.plugins || {}) };
+        curPlugins[pluginKey] = chk.checked;
+        this.sendCommand({
+          type: "update_world",
+          patch: { plugins: curPlugins },
+        });
+        this._setStatus(`Plugin Gazebo '${pluginKey}' ${chk.checked ? "activado" : "desactivado"}`);
+      });
+    });
+
+    // 4.5 Export Parametric .sdf.xacro
+    document.getElementById("btn-export-xacro")?.addEventListener("click", async () => {
+      const res = await fetch("/api/export_xacro", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        const blob = new Blob([data.xacro_xml], { type: "application/xml" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = data.filename || "custebo_world.sdf.xacro";
+        a.click();
+        URL.revokeObjectURL(url);
+        this._setStatus(`🧬 Exportado archivo paramétrico en ${data.exported_path}`);
+      }
+    });
 
     // Export Clean SDF
     document.getElementById("btn-export-sdf").addEventListener("click", async () => {

@@ -83,6 +83,7 @@
       <input id="file-load-input" type="file" accept=".json,.gproj" style="display:none" />
       <button id="btn-import-sdf" class="tool-btn" title="Importar un archivo .sdf o .world existente y limpiar su basura dinámica">📥 Importar .SDF</button>
       <input id="file-sdf-input" type="file" accept=".sdf,.world,.xml" style="display:none" />
+      <button id="btn-export-xacro" class="tool-btn" title="Exportar mundo paramétrico .sdf.xacro">🧬 .XACRO</button>
       <button id="btn-export-sdf" class="btn-primary" title="Exportar archivo .sdf limpio y validado">⬇ Exportar .SDF</button>
       <button id="btn-play-gz" class="btn-success" title="Lanzar Gazebo Harmonic con el mundo actual">▶ Play Gazebo</button>
     </div>
@@ -216,6 +217,57 @@
             <div class="create-grid" style="margin-bottom:0;">
               <button id="btn-distribute-x" class="tool-btn" title="Distribuir objetos uniformemente en X">↔ Distribuir X</button>
               <button id="btn-distribute-y" class="tool-btn" title="Distribuir objetos uniformemente en Y">↕ Distribuir Y</button>
+            </div>
+          </div>
+
+          <!-- INTEGRACIÓN PROFUNDA ROS 2, NAV2 Y SENSORES (FASE 4) -->
+          <div class="palette-cat-title custom-cat-header">
+            <span>🤖 ROS 2, Nav2 y Sensores</span>
+            <button id="btn-toggle-ros2" class="mini-btn">Abrir</button>
+          </div>
+          <div id="ros2-drawer" class="import-drawer">
+            <!-- 4.1 Instant 2D Map Generator (map.pgm + map.yaml) -->
+            <div style="font-weight:700;color:#38bdf8;font-size:11px;">🗺 Generador Mapa 2D Nav2 (map.pgm + map.yaml)</div>
+            <div class="vec3-grid">
+              <div class="vec-field"><span class="vec-axis z">Z₀</span><input id="nav2-zmin" type="number" step="0.05" value="0.15" title="Altura mínima de corte LiDAR (m)" /></div>
+              <div class="vec-field"><span class="vec-axis z">Z₁</span><input id="nav2-zmax" type="number" step="0.05" value="0.60" title="Altura máxima de corte LiDAR (m)" /></div>
+              <div class="vec-field"><span class="vec-axis x">Res</span><input id="nav2-res" type="number" step="0.01" min="0.02" value="0.05" title="Resolución (m/píxel)" /></div>
+            </div>
+            <div class="create-grid" style="margin-bottom:4px;">
+              <button id="btn-gen-nav2-map" class="btn-primary" style="font-size:11px;padding:5px;" title="Cortar la geometría a la altura Z del LiDAR y previsualizar el mapa 2D">👁 Previsualizar Mapa</button>
+              <button id="btn-dl-nav2-map" class="tool-btn" style="font-size:11px;padding:5px;" title="Descargar map.pgm y map.yaml calibrados para Nav2 / AMCL">⬇ map.pgm + .yaml</button>
+            </div>
+            <div id="nav2-map-preview-box" class="hidden" style="background:#090d14;border:1px solid #283242;border-radius:5px;padding:6px;text-align:center;margin-bottom:6px;">
+              <canvas id="nav2-map-canvas" width="220" height="160" style="max-width:100%;border:1px solid #3b4654;image-rendering:pixelated;background:#fff;"></canvas>
+              <div id="nav2-map-meta" style="font-size:10px;color:#94a3b8;margin-top:3px;font-family:var(--font-mono);"></div>
+            </div>
+
+            <!-- 4.2 Nav2 Waypoints & Topological Route Graph -->
+            <div style="font-weight:700;color:#38bdf8;font-size:11px;margin-top:4px;">📍 Waypoints Nav2 y Ruta Topológica</div>
+            <div class="create-grid" style="margin-bottom:4px;">
+              <button id="btn-tool-waypoint" class="tool-btn" title="Haz clic en el suelo 3D para colocar Waypoints conectados en secuencia">🎯 Clic en Suelo</button>
+              <button id="btn-add-waypoint" class="tool-btn" title="Insertar Waypoint Nav2">➕ Waypoint</button>
+            </div>
+            <button id="btn-export-waypoints" class="tool-btn" style="width:100%;margin-bottom:6px;" title="Exportar grafo de waypoints a YAML compatible con nav2_waypoint_follower">⬇ Exportar nav2_waypoints.yaml</button>
+
+            <!-- 4.3 Robot Spawn Poses & Static Environmental Sensors -->
+            <div style="font-weight:700;color:#38bdf8;font-size:11px;margin-top:4px;">🤖 Spawn Robot y Sensores Fijos (Frustum 3D)</div>
+            <div class="create-grid" style="margin-bottom:4px;">
+              <button id="btn-add-robot-spawn" class="create-btn" title="Añadir marcador visual de Spawn de Robot (-x -y -z -Y)">🤖 Spawn Robot</button>
+              <button id="btn-add-sensor-rgbd" class="create-btn" title="Añadir cámara RGB-D estática con cono de visión Frustum 3D">📷 Cámara RGB-D</button>
+              <button id="btn-add-sensor-lidar3d" class="create-btn" title="Añadir LiDAR 3D de 16 capas">📡 LiDAR 3D</button>
+              <button id="btn-add-sensor-lidar2d" class="create-btn" title="Añadir LiDAR 2D planar">📡 LiDAR 2D</button>
+            </div>
+            <button id="btn-export-bridge" class="tool-btn" style="width:100%;margin-bottom:6px;" title="Autogenerar configuración YAML para ros_gz_bridge con todos los sensores del mundo">⬇ Exportar ros_gz_bridge.yaml</button>
+
+            <!-- 4.4 Dynamic Actors (<actor>) & World Plugins -->
+            <div style="font-weight:700;color:#38bdf8;font-size:11px;margin-top:4px;">🚶 Actores Dinámicos (&lt;actor&gt;) y Sistemas</div>
+            <button id="btn-add-actor" class="create-btn" style="width:100%;margin-bottom:6px;" title="Añadir peatón u obstáculo móvil animado con trayectoria en bucle">🚶 Añadir Peatón en Ruta (&lt;actor&gt;)</button>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;font-size:11px;color:var(--text-muted);">
+              <label><input type="checkbox" class="world-plugin-chk" data-plugin="sensors" checked /> Sensors (Ogre2)</label>
+              <label><input type="checkbox" class="world-plugin-chk" data-plugin="imu" /> IMU</label>
+              <label><input type="checkbox" class="world-plugin-chk" data-plugin="navsat" /> NavSat GPS</label>
+              <label><input type="checkbox" class="world-plugin-chk" data-plugin="magnetometer" /> Magnetometer</label>
             </div>
           </div>
 

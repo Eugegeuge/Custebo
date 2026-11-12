@@ -208,3 +208,4 @@ def reconstruct_3d_walls_from_pgm(
         nodes.append(wall_node)
 
     return nodes
+

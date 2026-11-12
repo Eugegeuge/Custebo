@@ -108,3 +108,4 @@ def create_parametric_terrain_node(
         "parts": parts,
     }
     return normalize_node_in_place(node)
+

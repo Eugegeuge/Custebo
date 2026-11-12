@@ -189,3 +189,4 @@ def compute_3d_ruler_measurement(
         "slope_deg": clean_float(slope_deg, 2),
         "yaw_deg": clean_float(yaw_deg, 2),
     }
+

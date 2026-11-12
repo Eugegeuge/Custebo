@@ -77,6 +77,7 @@ class SceneGraphDocument:
                 {"id": "folder_env", "name": "Environment & Lights", "visible": True, "locked": False},
                 {"id": "folder_arch", "name": "Static Architecture", "visible": True, "locked": False},
                 {"id": "folder_props", "name": "Models & Props", "visible": True, "locked": False},
+                {"id": "folder_ros2", "name": "ROS 2, Nav2 & Sensors", "visible": True, "locked": False},
             ],
             nodes=[
                 create_light_node(

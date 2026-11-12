@@ -212,3 +212,4 @@ def generate_scatter_brush(
         )
 
     return clones
+

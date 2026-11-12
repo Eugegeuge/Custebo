@@ -45,6 +45,7 @@ from core.commands import (
     UpdateWorldSettingsCommand,
 )
 from core.compilers import SDFCompiler
+from core.compilers.xacro_compiler import compile_scene_to_xacro
 from core.importers import (
     analyze_mesh_file,
     ensure_sample_cad_meshes,
@@ -63,6 +64,15 @@ from core.procedural import (
     generate_spline_clones,
     reconstruct_3d_walls_from_pgm,
     snap_node_to_nearest_neighbor,
+)
+from core.ros2.nav2_map_generator import generate_nav2_occupancy_map
+from core.ros2.navigation_tools import (
+    create_dynamic_actor_node,
+    create_robot_spawn_node,
+    create_static_sensor_node,
+    create_waypoint_node,
+    export_nav2_waypoints_yaml,
+    generate_ros_gz_bridge_yaml,
 )
 from core.schema import (
     ARCHETYPE_CATALOG,
@@ -348,8 +358,16 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
                 self._handle_delete_custom_object(body)
             elif parsed.path == "/api/import_sdf":
                 self._handle_import_sdf(body)
-            elif parsed.path == "/api/import_pgm_walls":
+            elif parsed.path in ("/api/import_pgm_walls", "/api/import_pgm_map"):
                 self._handle_import_pgm_walls(body)
+            elif parsed.path == "/api/generate_nav2_map":
+                self._handle_generate_nav2_map(body)
+            elif parsed.path == "/api/export_nav2_waypoints":
+                self._handle_export_nav2_waypoints()
+            elif parsed.path == "/api/export_ros_gz_bridge":
+                self._handle_export_ros_gz_bridge()
+            elif parsed.path == "/api/export_xacro":
+                self._handle_export_xacro(body)
             elif parsed.path == "/api/new_project":
                 world_name = str(body.get("world_name", "custebo_world")).strip() or "custebo_world"
                 SESSION.manager = CommandManager(SceneGraphDocument.create_default(world_name))
@@ -555,11 +573,11 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
                     BatchUpdatePosesCommand(poses_map, label=f"CAD {mode} ({len(poses_map)} objects)")
                 )
 
-        elif cmd_type == "extrude_floorplan_walls":
-            points_xy = list(body.get("points_xy", []))
+        elif cmd_type in ("extrude_floorplan_walls", "extrude_floorplan"):
+            points_xy = list(body.get("points_xy", body.get("points", [])))
             thickness = float(body.get("thickness", 0.20))
             height = float(body.get("height", 2.50))
-            closed_loop = bool(body.get("closed_loop", False))
+            closed_loop = bool(body.get("closed_loop", body.get("closed", False)))
             wall_type = str(body.get("wall_type", "wall"))
             walls = extrude_polyline_to_walls(
                 points_xy=points_xy,
@@ -573,7 +591,7 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
                 SESSION.manager.execute(cmd)
                 created_node_id = cmd.nodes_list[-1]["id"]
 
-        elif cmd_type == "generate_grid_array":
+        elif cmd_type in ("generate_grid_array", "grid_array_clone"):
             node_id = str(body.get("node_id", ""))
             src = SESSION.manager.doc.get_node(node_id)
             if src is None:
@@ -593,29 +611,36 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
                 SESSION.manager.execute(cmd)
                 created_node_id = cmd.nodes_list[-1]["id"]
 
-        elif cmd_type == "generate_spline_clones":
+        elif cmd_type in ("generate_spline_clones", "spline_clone"):
             node_id = str(body.get("node_id", ""))
             src = SESSION.manager.doc.get_node(node_id)
             if src is None:
                 src = create_archetype_node("traffic_cone", name="cone")
-            pts = body.get("control_points_xy", [[-4.0, -3.0], [-1.5, 2.0], [1.5, -2.0], [4.0, 3.0]])
+            pts = body.get(
+                "control_points_xy",
+                body.get("control_points", [[-4.0, -3.0], [-1.5, 2.0], [1.5, -2.0], [4.0, 3.0]]),
+            )
             count = int(body.get("count", 8))
-            align_tan = bool(body.get("align_to_tangent", True))
+            align_tan = bool(body.get("align_to_tangent", body.get("align_tangent", True)))
             clones = generate_spline_clones(src, pts, count=count, align_to_tangent=align_tan)
             if clones:
                 cmd = AddMultipleNodesCommand(clones, label=f"Spline Cloner ({len(clones)} clones)")
                 SESSION.manager.execute(cmd)
                 created_node_id = cmd.nodes_list[-1]["id"]
 
-        elif cmd_type == "generate_scatter_brush":
+        elif cmd_type in ("generate_scatter_brush", "scatter_brush"):
             node_id = str(body.get("node_id", ""))
-            src = SESSION.manager.doc.get_node(node_id)
+            src = SESSION.manager.doc.get_node(node_id) if node_id else None
             if src is None:
-                src = create_archetype_node("cardboard_box", name="scatter_box")
-            center_xy = tuple(body.get("center_xy", [0.0, 0.0])[:2])
+                arch = str(body.get("archetype", "cardboard_box"))
+                src = create_archetype_node(arch, name=f"scatter_{arch}")
+            if "center_xy" in body:
+                center_xy = tuple(body.get("center_xy", [0.0, 0.0])[:2])
+            else:
+                center_xy = (float(body.get("center_x", 0.0)), float(body.get("center_y", 0.0)))
             radius = float(body.get("radius", 5.0))
             count = int(body.get("count", 10))
-            min_dist = float(body.get("min_distance", 0.9))
+            min_dist = float(body.get("min_distance", body.get("min_clearance", 0.9)))
             scale_min = float(body.get("scale_min", 0.8))
             scale_max = float(body.get("scale_max", 1.25))
             seed = body.get("seed")
@@ -636,10 +661,10 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
                 created_node_id = cmd.nodes_list[-1]["id"]
 
         elif cmd_type == "generate_terrain":
-            profile = str(body.get("profile", "hills"))
-            sx = float(body.get("size_x", 12.0))
-            sy = float(body.get("size_y", 12.0))
-            mh = float(body.get("max_height", 0.80))
+            profile = str(body.get("profile", body.get("preset", "hills")))
+            sx = float(body.get("size_x", body.get("width", 12.0)))
+            sy = float(body.get("size_y", body.get("depth", 12.0)))
+            mh = float(body.get("max_height", body.get("amplitude", 0.80)))
             res = int(body.get("grid_res", 7))
             tnode = create_parametric_terrain_node(
                 name=f"terreno_{profile}",
@@ -651,6 +676,63 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
                 heightmaps_dir=ASSETS_DIR / "heightmaps",
             )
             cmd = AddNodeCommand(tnode)
+            SESSION.manager.execute(cmd)
+            created_node_id = cmd.node_data["id"]
+
+        elif cmd_type == "add_waypoint":
+            existing_wps = [n for n in SESSION.manager.doc.nodes if n.get("type") == "waypoint"]
+            idx = len(existing_wps) + 1
+            pose = body.get("pose", [round((idx - 1) * 1.5, 2), 0.0, 0.02, 0.0, 0.0, 0.0])
+            wp_node = create_waypoint_node(
+                name=str(body.get("name", f"wp_{idx}")),
+                pose=pose,
+                dwell_time_s=float(body.get("dwell_time_s", 0.0)),
+            )
+            cmd = AddNodeCommand(wp_node)
+            SESSION.manager.execute(cmd)
+            created_node_id = cmd.node_data["id"]
+
+        elif cmd_type == "add_robot_spawn":
+            existing_spawns = [n for n in SESSION.manager.doc.nodes if n.get("type") == "robot_spawn"]
+            idx = len(existing_spawns) + 1
+            robot_model = str(body.get("robot_model", "turtlebot4"))
+            pose = body.get("pose", [-1.5, -1.5 + (idx - 1) * 1.2, 0.05, 0.0, 0.0, 0.0])
+            sp_node = create_robot_spawn_node(
+                name=str(body.get("name", f"spawn_{robot_model}_{idx}")),
+                robot_model=robot_model,
+                robot_namespace=str(body.get("robot_namespace", f"robot{idx}")),
+                pose=pose,
+            )
+            cmd = AddNodeCommand(sp_node)
+            SESSION.manager.execute(cmd)
+            created_node_id = cmd.node_data["id"]
+
+        elif cmd_type == "add_sensor":
+            sensor_type = str(body.get("sensor_type", "camera_rgbd"))
+            existing_sensors = [n for n in SESSION.manager.doc.nodes if n.get("type") == "sensor"]
+            idx = len(existing_sensors) + 1
+            s_node = create_static_sensor_node(
+                name=str(body.get("name", f"{sensor_type}_{idx}")),
+                sensor_type=sensor_type,
+                pose=body.get("pose"),
+                fov_deg=float(body.get("fov_deg", 75.0)),
+                range_max=float(body.get("range_max", 8.0)),
+            )
+            cmd = AddNodeCommand(s_node)
+            SESSION.manager.execute(cmd)
+            created_node_id = cmd.node_data["id"]
+
+        elif cmd_type == "add_actor":
+            existing_actors = [n for n in SESSION.manager.doc.nodes if n.get("type") == "actor"]
+            idx = len(existing_actors) + 1
+            a_node = create_dynamic_actor_node(
+                name=str(body.get("name", f"actor_peaton_{idx}")),
+                pose=body.get("pose"),
+                waypoints=body.get("waypoints"),
+                speed_mps=float(body.get("speed_mps", 1.1)),
+                loop=bool(body.get("loop", True)),
+            )
+            cmd = AddNodeCommand(a_node)
             SESSION.manager.execute(cmd)
             created_node_id = cmd.node_data["id"]
 
@@ -752,7 +834,7 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
         self._send_json(SESSION.build_full_Payload())
 
     def _handle_import_pgm_walls(self, body: Dict[str, Any]) -> None:
-        b64_data = str(body.get("content_base64", ""))
+        b64_data = str(body.get("content_base64", body.get("pgm_base64", "")))
         if not b64_data:
             self._send_json({"ok": False, "error": "Archivo PGM vacío."}, HTTPStatus.BAD_REQUEST)
             return
@@ -766,7 +848,103 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
             SESSION.manager.execute(
                 AddMultipleNodesCommand(walls, label=f"Import PGM Map ({len(walls)} 3D Walls)")
             )
-        self._send_json(SESSION.build_full_Payload())
+        payload = SESSION.build_full_Payload()
+        payload["walls_created"] = len(walls)
+        self._send_json(payload)
+
+    def _handle_generate_nav2_map(self, body: Dict[str, Any]) -> None:
+        nav_cfg = SESSION.manager.doc.robotics.get("nav2_map_config", {})
+        z_min = float(body.get("z_min", nav_cfg.get("z_min", 0.15)))
+        z_max = float(body.get("z_max", nav_cfg.get("z_max", 0.60)))
+        resolution = float(body.get("resolution", nav_cfg.get("resolution", 0.05)))
+        padding_m = float(body.get("padding_m", nav_cfg.get("padding_m", 2.0)))
+
+        SESSION.manager.doc.robotics["nav2_map_config"] = {
+            "z_min": z_min,
+            "z_max": z_max,
+            "resolution": resolution,
+            "padding_m": padding_m,
+        }
+
+        world_name = SESSION.manager.doc.world.get("name", "custebo_world")
+        pgm_filename = f"{world_name}_map.pgm"
+        yaml_filename = f"{world_name}_map.yaml"
+
+        result = generate_nav2_occupancy_map(
+            nodes=SESSION.manager.doc.nodes,
+            z_min=z_min,
+            z_max=z_max,
+            resolution=resolution,
+            padding_m=padding_m,
+            map_filename=pgm_filename,
+        )
+
+        pgm_path = EXPORTS_DIR / pgm_filename
+        yaml_path = EXPORTS_DIR / yaml_filename
+        pgm_path.write_bytes(result["pgm_bytes"])
+        yaml_path.write_text(result["yaml_content"], encoding="utf-8")
+
+        self._send_json(
+            {
+                "ok": True,
+                "width": result["width"],
+                "height": result["height"],
+                "resolution": result["resolution"],
+                "origin": result["origin"],
+                "z_min": result["z_min"],
+                "z_max": result["z_max"],
+                "obstacle_count": result["obstacle_count"],
+                "pgm_filename": pgm_filename,
+                "yaml_filename": yaml_filename,
+                "pgm_path": str(pgm_path),
+                "yaml_path": str(yaml_path),
+                "pgm_base64": result["pgm_base64"],
+                "yaml_content": result["yaml_content"],
+            }
+        )
+
+    def _handle_export_nav2_waypoints(self) -> None:
+        yaml_str = export_nav2_waypoints_yaml(SESSION.manager.doc)
+        world_name = SESSION.manager.doc.world.get("name", "custebo_world")
+        out_path = EXPORTS_DIR / f"{world_name}_nav2_waypoints.yaml"
+        out_path.write_text(yaml_str, encoding="utf-8")
+        self._send_json(
+            {
+                "ok": True,
+                "exported_path": str(out_path),
+                "filename": out_path.name,
+                "yaml_content": yaml_str,
+            }
+        )
+
+    def _handle_export_ros_gz_bridge(self) -> None:
+        yaml_str = generate_ros_gz_bridge_yaml(SESSION.manager.doc)
+        world_name = SESSION.manager.doc.world.get("name", "custebo_world")
+        out_path = EXPORTS_DIR / f"{world_name}_ros_gz_bridge.yaml"
+        out_path.write_text(yaml_str, encoding="utf-8")
+        self._send_json(
+            {
+                "ok": True,
+                "exported_path": str(out_path),
+                "filename": out_path.name,
+                "yaml_content": yaml_str,
+            }
+        )
+
+    def _handle_export_xacro(self, body: Dict[str, Any]) -> None:
+        target = str(body.get("target", SESSION.manager.doc.world.get("sdf_target", "harmonic")))
+        xacro_xml = compile_scene_to_xacro(SESSION.manager.doc, target=target)
+        world_name = SESSION.manager.doc.world.get("name", "custebo_world")
+        out_path = EXPORTS_DIR / f"{world_name}.sdf.xacro"
+        out_path.write_text(xacro_xml, encoding="utf-8")
+        self._send_json(
+            {
+                "ok": True,
+                "exported_path": str(out_path),
+                "filename": out_path.name,
+                "xacro_xml": xacro_xml,
+            }
+        )
 
     def _handle_save_project(self, body: Dict[str, Any]) -> None:
         filename = str(body.get("filename", "")).strip()

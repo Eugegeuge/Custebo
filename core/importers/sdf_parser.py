@@ -308,3 +308,4 @@ def _extract_inertial(link_el: ET.Element) -> Dict[str, Any]:
     except ValueError:
         pass
     return {"mode": "auto", "material_preset": "wood", "center_of_mass": [0.0, 0.0, 0.0]}
+

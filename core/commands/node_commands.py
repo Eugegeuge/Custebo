@@ -146,9 +146,10 @@ class UpdateNodeCommand(Command):
                 self.patch["name"], exclude_id=self.node_id
             )
 
-        old_height = float(node.get("geometry", {}).get("size", [1, 1, 1])[2])
+        old_size = node.get("geometry", {}).get("size", [1, 1, 1])
+        old_height = float(old_size[2]) if isinstance(old_size, list) and len(old_size) >= 3 else 0.0
         old_z = float(node.get("pose", [0, 0, 0, 0, 0, 0])[2])
-        was_on_ground = abs(old_z - old_height * 0.5) < 1e-3
+        was_on_ground = old_height > 0.0 and abs(old_z - old_height * 0.5) < 1e-3
 
         _deep_merge_dict(node, self.patch)
         if node.get("archetype") and any(
@@ -156,7 +157,8 @@ class UpdateNodeCommand(Command):
         ):
             rebuild_archetype_node(node)
             if was_on_ground and "pose" not in self.patch:
-                new_h = float(node.get("geometry", {}).get("size", [1, 1, 1])[2])
+                new_size = node.get("geometry", {}).get("size", [1, 1, 1])
+                new_h = float(new_size[2]) if isinstance(new_size, list) and len(new_size) >= 3 else old_height
                 node["pose"][2] = clean_float(new_h * 0.5)
 
         normalize_node_in_place(node)

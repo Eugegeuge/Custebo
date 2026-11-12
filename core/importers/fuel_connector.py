@@ -248,3 +248,4 @@ def scan_ros2_workspaces(extra_paths: Optional[List[str]] = None) -> List[Dict[s
         )
 
     return discovered
+

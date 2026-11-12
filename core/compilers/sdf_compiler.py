@@ -188,6 +188,63 @@ class SDFCompiler:
                     "end_line": end_ln,
                 }
 
+        # ---------------------------------------------------------------------
+        # 6. STATIC ENVIRONMENTAL SENSORS (RGB-D CAMERAS, 2D/3D LIDARS)
+        # ---------------------------------------------------------------------
+        sensor_nodes = [n for n in doc.nodes if n.get("type") == "sensor"]
+        if sensor_nodes:
+            emit("")
+            emit("    <!-- ==================== STATIC ENVIRONMENTAL SENSORS =============== -->")
+            for snode in sensor_nodes:
+                start_ln = len(lines) + 1
+                SDFCompiler._emit_sensor_node(snode, emit)
+                end_ln = len(lines)
+                line_map[snode["id"]] = {
+                    "name": snode.get("name", ""),
+                    "start_line": start_ln,
+                    "end_line": end_ln,
+                }
+
+        # ---------------------------------------------------------------------
+        # 7. DYNAMIC ACTORS & PEDESTRIAN TRAJECTORIES (<actor>)
+        # ---------------------------------------------------------------------
+        actor_nodes = [n for n in doc.nodes if n.get("type") == "actor"]
+        if actor_nodes:
+            emit("")
+            emit("    <!-- ==================== DYNAMIC ACTORS (<actor>) =================== -->")
+            for anode in actor_nodes:
+                start_ln = len(lines) + 1
+                SDFCompiler._emit_actor_node(anode, emit)
+                end_ln = len(lines)
+                line_map[anode["id"]] = {
+                    "name": anode.get("name", ""),
+                    "start_line": start_ln,
+                    "end_line": end_ln,
+                }
+
+        # ---------------------------------------------------------------------
+        # 8. ROS 2 SPAWN POSES & NAV2 WAYPOINT METADATA COMMENTS
+        # ---------------------------------------------------------------------
+        ros_markers = [n for n in doc.nodes if n.get("type") in ("robot_spawn", "waypoint")]
+        if ros_markers:
+            emit("")
+            emit("    <!-- ==================== ROS 2 SPAWN & NAV2 WAYPOINT MARKERS ======== -->")
+            for rnode in ros_markers:
+                start_ln = len(lines) + 1
+                rname = xml_escape(str(rnode.get("name", "marker")))
+                rpose = format_vec(rnode.get("pose", [0, 0, 0, 0, 0, 0]), 4)
+                if rnode.get("type") == "robot_spawn":
+                    rmodel = xml_escape(str(rnode.get("robot_spawn", {}).get("robot_model", "robot")))
+                    emit(f"    <!-- [ROBOT_SPAWN] name={rname} model={rmodel} pose=\"{rpose}\" -->")
+                else:
+                    emit(f"    <!-- [NAV2_WAYPOINT] name={rname} pose=\"{rpose}\" -->")
+                end_ln = len(lines)
+                line_map[rnode["id"]] = {
+                    "name": rnode.get("name", ""),
+                    "start_line": start_ln,
+                    "end_line": end_ln,
+                }
+
         emit("  </world>")
         emit("</sdf>")
         emit("")
@@ -571,4 +628,155 @@ class SDFCompiler:
 
         emit("      </link>")
         emit("    </model>")
+
+    @staticmethod
+    def _emit_sensor_node(node: Dict[str, Any], emit) -> None:
+        import math
+
+        name = xml_escape(str(node.get("name", "world_sensor")))
+        pose = node.get("pose", [0.0, 0.0, 2.0, 0.0, 0.0, 0.0])
+        sdata = node.get("sensor", {})
+        stype = str(sdata.get("sensor_type", "camera_rgbd"))
+        topic = xml_escape(str(sdata.get("topic", f"/world_sensors/{name}")))
+        rate = format_number(float(sdata.get("update_rate", 15.0)), 2)
+        fov_rad = format_number(math.radians(float(sdata.get("fov_deg", 75.0))), 4)
+        r_min = format_number(float(sdata.get("range_min", 0.12)), 3)
+        r_max = format_number(float(sdata.get("range_max", 8.0)), 3)
+
+        emit(f'    <model name="{name}">')
+        emit("      <static>true</static>")
+        emit(f"      <pose>{format_vec(pose, 6)}</pose>")
+        emit('      <link name="sensor_link">')
+        emit('        <visual name="sensor_housing">')
+        emit("          <geometry>")
+        emit("            <box><size>0.12 0.12 0.08</size></box>")
+        emit("          </geometry>")
+        emit("          <material>")
+        emit("            <ambient>0.2 0.2 0.25 1</ambient>")
+        emit("            <diffuse>0.65 0.35 0.96 1</diffuse>")
+        emit("          </material>")
+        emit("        </visual>")
+
+        if stype == "camera_rgbd":
+            w = int(sdata.get("width", 640))
+            h = int(sdata.get("height", 480))
+            emit(f'        <sensor name="{name}_rgbd" type="rgbd_camera">')
+            emit("          <always_on>true</always_on>")
+            emit(f"          <update_rate>{rate}</update_rate>")
+            emit(f"          <topic>{topic}</topic>")
+            emit("          <camera>")
+            emit(f"            <horizontal_fov>{fov_rad}</horizontal_fov>")
+            emit("            <image>")
+            emit(f"              <width>{w}</width>")
+            emit(f"              <height>{h}</height>")
+            emit("              <format>R8G8B8</format>")
+            emit("            </image>")
+            emit("            <clip>")
+            emit(f"              <near>{r_min}</near>")
+            emit(f"              <far>{r_max}</far>")
+            emit("            </clip>")
+            emit("          </camera>")
+            emit("        </sensor>")
+        else:
+            samples = int(sdata.get("horizontal_samples", 720))
+            v_layers = int(sdata.get("vertical_layers", 16 if stype == "lidar_3d" else 1))
+            emit(f'        <sensor name="{name}_lidar" type="gpu_lidar">')
+            emit("          <always_on>true</always_on>")
+            emit(f"          <update_rate>{rate}</update_rate>")
+            emit(f"          <topic>{topic}/scan</topic>")
+            emit("          <lidar>")
+            emit("            <scan>")
+            emit("              <horizontal>")
+            emit(f"                <samples>{samples}</samples>")
+            emit("                <resolution>1.0</resolution>")
+            emit("                <min_angle>-3.14159</min_angle>")
+            emit("                <max_angle>3.14159</max_angle>")
+            emit("              </horizontal>")
+            emit("              <vertical>")
+            emit(f"                <samples>{v_layers}</samples>")
+            emit("                <resolution>1.0</resolution>")
+            emit(f"                <min_angle>{'-0.2618' if v_layers > 1 else '0.0'}</min_angle>")
+            emit(f"                <max_angle>{'0.2618' if v_layers > 1 else '0.0'}</max_angle>")
+            emit("              </vertical>")
+            emit("            </scan>")
+            emit("            <range>")
+            emit(f"              <min>{r_min}</min>")
+            emit(f"              <max>{r_max}</max>")
+            emit("              <resolution>0.01</resolution>")
+            emit("            </range>")
+            emit("          </lidar>")
+            emit("        </sensor>")
+
+        emit("      </link>")
+        emit("    </model>")
+
+    @staticmethod
+    def _emit_actor_node(node: Dict[str, Any], emit) -> None:
+        import math
+
+        name = xml_escape(str(node.get("name", "actor_walker")))
+        adata = node.get("actor", {})
+        speed = max(0.1, float(adata.get("speed_mps", 1.1)))
+        loop_str = "true" if adata.get("loop", True) else "false"
+        skin_uri = xml_escape(
+            str(
+                adata.get(
+                    "skin_uri",
+                    "https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae",
+                )
+            )
+        )
+        waypoints = adata.get("waypoints", [])
+        if not isinstance(waypoints, list) or len(waypoints) < 2:
+            pose = node.get("pose", [0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+            waypoints = [[pose[0], pose[1], 1.0], [pose[0] + 3.0, pose[1], 1.0]]
+
+        emit(f'    <actor name="{name}">')
+        emit("      <skin>")
+        emit(f"        <filename>{skin_uri}</filename>")
+        emit("        <scale>1.0</scale>")
+        emit("      </skin>")
+        emit('      <animation name="walk">')
+        emit(f"        <filename>{skin_uri}</filename>")
+        emit("        <interpolate_x>true</interpolate_x>")
+        emit("      </animation>")
+        emit("      <script>")
+        emit(f"        <loop>{loop_str}</loop>")
+        emit("        <auto_start>true</auto_start>")
+        emit('        <trajectory id="0" type="walk">')
+
+        sim_t = 0.0
+        pts = list(waypoints)
+        if adata.get("loop", True) and len(pts) >= 2:
+            pts = pts + [pts[0]]
+
+        for idx, pt in enumerate(pts):
+            x, y = float(pt[0]), float(pt[1])
+            z = float(pt[2]) if len(pt) >= 3 else 1.0
+            if idx > 0:
+                prev = pts[idx - 1]
+                dist = math.hypot(x - float(prev[0]), y - float(prev[1]))
+                sim_t += max(0.2, dist / speed)
+                yaw = math.atan2(y - float(prev[1]), x - float(prev[0]))
+            elif len(pts) > 1:
+                nxt = pts[1]
+                yaw = math.atan2(float(nxt[1]) - y, float(nxt[0]) - x)
+            else:
+                yaw = 0.0
+
+            emit("          <waypoint>")
+            emit(f"            <time>{format_number(sim_t, 3)}</time>")
+            emit(f"            <pose>{format_vec([x, y, z, 0.0, 0.0, yaw], 4)}</pose>")
+            emit("          </waypoint>")
+
+        emit("        </trajectory>")
+        emit("      </script>")
+        emit("    </actor>")
+
+
+def compile_scene_to_sdf(doc: SceneGraphDocument, target: str = "harmonic") -> Dict[str, Any]:
+    """Convenience wrapper returning `{\"xml\": str, \"line_map\": dict}`."""
+    xml_str, line_map = SDFCompiler.compile(doc, target_override=target)
+    return {"xml": xml_str, "line_map": line_map}
+
 
