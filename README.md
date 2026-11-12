@@ -44,9 +44,32 @@
 
 ## 🚀 Inicio Rápido
 
-No requiere compilación ni dependencias pesadas externas (funciona directamente con **Python 3.10+**):
+### 📦 Requisitos y dependencias
+
+| Componente | Obligatorio | Detalle |
+|---|---|---|
+| **Python 3.10+** | ✅ | Solo biblioteca estándar: **no hay paquetes `pip` que instalar** (`requirements.txt` está vacío a propósito). |
+| **Navegador moderno** (Chrome, Firefox, Edge) | ✅ | Con WebGL y soporte de módulos ES. |
+| **Conexión a Internet (primer uso)** | ✅ | El visor 3D carga [Three.js 0.160](https://threejs.org/) desde el CDN `unpkg.com`. *(Pendiente: incluirlo en local para uso 100 % offline.)* |
+| **Gazebo (`gz`)** Harmonic o Classic | ⭕ opcional | Para `✓ Verificar gz sdf` y `▶ Play Gazebo`. |
+| **ROS 2** (Jazzy/Humble) + `xacro` | ⭕ opcional | Para expandir `.sdf.xacro` y usar Nav2 / `ros_gz_bridge`. |
+| **Git** | ⭕ opcional | Para clonar el repositorio. |
+
+Instalación opcional de Gazebo/ROS 2 en Ubuntu 24.04:
 
 ```bash
+sudo apt install ros-jazzy-ros-gz ros-jazzy-xacro
+```
+
+---
+
+## 🚀 Inicio Rápido
+
+No requiere compilación ni dependencias de `pip` (funciona directamente con **Python 3.10+**):
+
+```bash
+git clone https://github.com/Eugegeuge/Custebo.git && cd Custebo
+
 # 1. Lanzar el servidor de Custebo Studio
 python3 server/app.py --host 127.0.0.1 --port 8080
 ```
