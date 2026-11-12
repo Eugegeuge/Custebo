@@ -19,11 +19,62 @@ from core.math_physics.transforms import (
     clean_float,
     compute_local_half_extents,
     compute_world_aabb,
+    euler_rpy_to_rotation_matrix,
 )
 from core.schema.scene_graph import SceneGraphDocument
 
+NON_SOLID_NODE_TYPES = ("light", "ground_plane", "waypoint", "robot_spawn", "sensor", "actor")
+FLAT_ROAD_ARCHETYPES = (
+    "road_straight",
+    "road_curved",
+    "road_intersection",
+    "road_crosswalk",
+    "roundabout",
+    "speed_bump",
+)
+
 
 def get_node_world_aabb(node: Dict[str, Any]) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+    pose = node.get("pose", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    scale = node.get("scale", [1.0, 1.0, 1.0])
+    parts = node.get("parts")
+
+    if isinstance(parts, list) and len(parts) > 0:
+        px, py, pz, pr, pp, pyaw = (float(v) for v in pose[:6])
+        sx, sy, sz = (float(v) for v in scale[:3])
+        rot = euler_rpy_to_rotation_matrix(pr, pp, pyaw)
+        min_x, min_y, min_z = 1e9, 1e9, 1e9
+        max_x, max_y, max_z = -1e9, -1e9, -1e9
+        for p in parts:
+            lp = p.get("local_pose", p.get("pose", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+            lx, ly, lz = float(lp[0]) * sx, float(lp[1]) * sy, float(lp[2]) * sz
+            wx = px + rot[0][0] * lx + rot[0][1] * ly + rot[0][2] * lz
+            wy = py + rot[1][0] * lx + rot[1][1] * ly + rot[1][2] * lz
+            wz = pz + rot[2][0] * lx + rot[2][1] * ly + rot[2][2] * lz
+            p_pose = [
+                wx,
+                wy,
+                wz,
+                pr + float(lp[3]) if len(lp) > 3 else pr,
+                pp + float(lp[4]) if len(lp) > 4 else pp,
+                pyaw + float(lp[5]) if len(lp) > 5 else pyaw,
+            ]
+            p_half = compute_local_half_extents(
+                p.get("shape", "box"),
+                size=p.get("size", [1.0, 1.0, 1.0]),
+                radius=float(p.get("radius", 0.2)),
+                length=float(p.get("length", 1.0)),
+            )
+            bmin, bmax = compute_world_aabb(p_pose, p_half, [sx, sy, sz])
+            min_x = min(min_x, bmin[0])
+            min_y = min(min_y, bmin[1])
+            min_z = min(min_z, bmin[2])
+            max_x = max(max_x, bmax[0])
+            max_y = max(max_y, bmax[1])
+            max_z = max(max_z, bmax[2])
+        if min_x <= max_x:
+            return ((min_x, min_y, min_z), (max_x, max_y, max_z))
+
     geom = node.get("geometry", {})
     half_ext = compute_local_half_extents(
         geom.get("shape", "box"),
@@ -31,11 +82,7 @@ def get_node_world_aabb(node: Dict[str, Any]) -> Tuple[Tuple[float, float, float
         radius=float(geom.get("radius", 0.5)),
         length=float(geom.get("length", 1.0)),
     )
-    return compute_world_aabb(
-        node.get("pose", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-        half_ext,
-        node.get("scale", [1.0, 1.0, 1.0]),
-    )
+    return compute_world_aabb(pose, half_ext, scale)
 
 
 def compute_smart_drop_z(doc: SceneGraphDocument, target_node_id: str) -> float:
@@ -50,21 +97,20 @@ def compute_smart_drop_z(doc: SceneGraphDocument, target_node_id: str) -> float:
 
     t_min, t_max = get_node_world_aabb(target)
     target_bottom_offset = float(target["pose"][2]) - t_min[2]
-    current_bottom_z = t_min[2]
 
     highest_support_z = 0.0
     for other in doc.nodes:
         if other.get("id") == target_node_id:
             continue
-        if other.get("type") in ("light", "ground_plane") or not other.get("visible", True):
+        if other.get("type") in NON_SOLID_NODE_TYPES or not other.get("visible", True):
             continue
 
         o_min, o_max = get_node_world_aabb(other)
         overlap_x = (t_min[0] < o_max[0] - 1e-3) and (t_max[0] > o_min[0] + 1e-3)
         overlap_y = (t_min[1] < o_max[1] - 1e-3) and (t_max[1] > o_min[1] + 1e-3)
         if overlap_x and overlap_y:
-            # Support is valid if its top is at or below the target's center Z
-            if o_max[2] <= float(target["pose"][2]) + 1e-2:
+            # Support is valid if its top is at or below the target's top
+            if o_max[2] <= t_max[2] - 1e-3:
                 highest_support_z = max(highest_support_z, o_max[2])
 
     return clean_float(highest_support_z + target_bottom_offset, 6)
@@ -146,11 +192,12 @@ def stack_node_on_target_or_nearest(
     doc: SceneGraphDocument,
     node_id: str,
     support_node_id: str | None = None,
-    max_search_distance: float = 10.0,
+    max_search_distance: float = 30.0,
 ) -> List[float]:
     """
     Place `node_id` directly ON TOP of `support_node_id` (if given) or the nearest supporting
-    object below/nearby (`Z = support_max_z + target_bottom_offset`).
+    3D object below/nearby (`Z = support_max_z + target_bottom_offset`).
+    Never mistakes flat roads/markings (`Z <= 0.12 m`) for support objects when real 3D objects exist.
     """
     target = doc.get_node(node_id)
     if target is None:
@@ -163,30 +210,73 @@ def stack_node_on_target_or_nearest(
     t_bottom_offset = float(pose[2]) - t_min[2]
 
     support_node = doc.get_node(support_node_id) if support_node_id else None
-
-    if support_node is None or support_node.get("id") == node_id:
-        # 1st priority: any visible object whose XY footprint already overlaps target
-        best_overlap_z = -1e9
-        for other in doc.nodes:
-            if other.get("id") == node_id or other.get("type") in ("light", "ground_plane") or not other.get("visible", True):
-                continue
-            o_min, o_max = get_node_world_aabb(other)
-            if (t_min[0] < o_max[0] and t_max[0] > o_min[0]) and (t_min[1] < o_max[1] and t_max[1] > o_min[1]):
-                if o_max[2] > best_overlap_z:
-                    best_overlap_z = o_max[2]
-                    support_node = other
+    if support_node is not None and support_node.get("id") == node_id:
+        support_node = None
 
     if support_node is None:
-        # 2nd priority: nearest visible object in XY within `max_search_distance`
-        best_d = max_search_distance
+        # Gather all valid solid candidates (excluding target itself and non-solid markers)
+        elevated_candidates: List[Tuple[Dict[str, Any], Tuple[float, float, float], Tuple[float, float, float]]] = []
+        flat_candidates: List[Tuple[Dict[str, Any], Tuple[float, float, float], Tuple[float, float, float]]] = []
+
         for other in doc.nodes:
-            if other.get("id") == node_id or other.get("type") in ("light", "ground_plane") or not other.get("visible", True):
+            if (
+                other.get("id") == node_id
+                or other.get("type") in NON_SOLID_NODE_TYPES
+                or not other.get("visible", True)
+            ):
                 continue
-            op = other.get("pose", [0, 0, 0])
-            d_xy = math.hypot(float(op[0]) - pose[0], float(op[1]) - pose[1])
-            if d_xy < best_d:
-                best_d = d_xy
-                support_node = other
+            o_min, o_max = get_node_world_aabb(other)
+            # Do not try to stack `target` onto an object that is already resting ON TOP of `target`
+            if o_min[2] >= t_max[2] - 0.02 and (
+                t_min[0] < o_max[0] and t_max[0] > o_min[0] and t_min[1] < o_max[1] and t_max[1] > o_min[1]
+            ):
+                continue
+            is_flat_road = other.get("archetype") in FLAT_ROAD_ARCHETYPES or (o_max[2] - o_min[2]) <= 0.12
+            if is_flat_road:
+                flat_candidates.append((other, o_min, o_max))
+            else:
+                elevated_candidates.append((other, o_min, o_max))
+
+        pool = elevated_candidates if elevated_candidates else flat_candidates
+
+        # 1st priority: any 3D object in `pool` whose XY footprint already overlaps `target`
+        # (prefer objects that `target` is not ALREADY resting flush on, or pick the highest one)
+        overlapping: List[Tuple[Dict[str, Any], float]] = []
+        for other, o_min, o_max in pool:
+            if (t_min[0] < o_max[0] - 1e-3 and t_max[0] > o_min[0] + 1e-3) and (
+                t_min[1] < o_max[1] - 1e-3 and t_max[1] > o_min[1] + 1e-3
+            ):
+                overlapping.append((other, o_max[2]))
+
+        if overlapping:
+            # Sort by top Z descending
+            overlapping.sort(key=lambda item: item[1], reverse=True)
+            support_node = overlapping[0][0]
+
+        # If target is already sitting at the exact top of `support_node` (or didn't overlap anything),
+        # look for the nearest 3D object in XY so pressing 'B' from beside a table/box jumps onto it!
+        already_on_support = (
+            support_node is not None
+            and abs(t_min[2] - get_node_world_aabb(support_node)[1][2]) < 0.015
+        )
+        if support_node is None or already_on_support:
+            best_d = max_search_distance
+            nearest_other = None
+            for other, o_min, o_max in pool:
+                if support_node is not None and other.get("id") == support_node.get("id"):
+                    continue
+                # Distance from target's XY center to the closest point on `other`'s XY AABB
+                clamped_x = min(max(pose[0], o_min[0]), o_max[0])
+                clamped_y = min(max(pose[1], o_min[1]), o_max[1])
+                d_edge = math.hypot(pose[0] - clamped_x, pose[1] - clamped_y)
+                op = other.get("pose", [0, 0, 0])
+                d_center = math.hypot(float(op[0]) - pose[0], float(op[1]) - pose[1])
+                score_d = d_edge + 0.15 * d_center
+                if score_d < best_d:
+                    best_d = score_d
+                    nearest_other = other
+            if nearest_other is not None:
+                support_node = nearest_other
 
     if support_node is None:
         return pose

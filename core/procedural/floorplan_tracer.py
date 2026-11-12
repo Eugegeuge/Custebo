@@ -323,66 +323,87 @@ def reconstruct_3d_walls_from_pgm(
         fill_ratio = n_pix / bbox_area_cells
 
         # Case A: Solid Circular Pillar / Round Obstacle -> Single Smooth Cylinder!
-        if (
-            n_pix >= 4
-            and aspect < 1.38
-            and fill_ratio >= 0.52
-            and max_r <= 1.8
-            and abs(span_x - span_y) <= 2.5 * res
-        ):
-            # Verify it is closer to a disc than a sharp square by checking corner occupancy or radial ratio
-            expected_disc_r = math.sqrt((n_pix * res * res) / math.pi)
-            if fill_ratio < 0.88 or n_pix <= 16:
-                cyl_idx += 1
-                radius = max(expected_disc_r, res * 0.8)
-                nodes.append(
-                    create_primitive_node(
-                        name=f"pgm_columna_{cyl_idx}",
-                        shape="cylinder",
-                        pose=[clean_float(cx, 4), clean_float(cy, 4), clean_float(wall_height * 0.5, 4), 0.0, 0.0, 0.0],
-                        radius=clean_float(radius, 4),
-                        length=clean_float(wall_height, 4),
-                        color=[0.70, 0.75, 0.82, 1.0],
-                        static=True,
-                        material_preset="concrete",
-                        folder_id="folder_arch",
-                    )
-                )
-                continue
-
-        # Case B: Hollow Circular Ring Wall -> Smooth Tangent Curved Wall Segments!
-        if (
-            n_pix >= 16
-            and aspect < 1.28
-            and fill_ratio < 0.48
-            and mean_r > 3.0 * res
-            and (std_r / max(mean_r, 1e-6)) < 0.22
-        ):
-            n_arc_segs = max(min(int((2.0 * math.pi * mean_r) / 0.65), 24), 10)
-            est_thick = max(min(2.2 * std_r + res, 0.35), 0.14)
-            arc_pts = [
-                (
-                    cx + mean_r * math.cos(2.0 * math.pi * i / n_arc_segs),
-                    cy + mean_r * math.sin(2.0 * math.pi * i / n_arc_segs),
-                )
-                for i in range(n_arc_segs)
-            ]
-            ring_walls = extrude_polyline_to_walls(
-                points_xy=arc_pts,
-                thickness=est_thick,
-                height=wall_height,
-                closed_loop=True,
-                wall_type="wall",
-                base_name="pgm_muro_curvo",
+        # A true rasterized disc has fill_ratio around pi/4 (~0.785) and its 4 bbox corners are empty.
+        r_min_px = min(r for r, _ in comp)
+        r_max_px = max(r for r, _ in comp)
+        c_min_px = min(c for _, c in comp)
+        c_max_px = max(c for _, c in comp)
+        comp_set = set(comp)
+        bbox_corners_occupied = sum(
+            1
+            for cr, cc in (
+                (r_min_px, c_min_px),
+                (r_min_px, c_max_px),
+                (r_max_px, c_min_px),
+                (r_max_px, c_max_px),
             )
-            # Slightly lengthen each segment for seamless mitered curve joints
-            for rw in ring_walls:
-                rw["archetype_params"]["length"] = clean_float(
-                    float(rw["archetype_params"]["length"]) + est_thick * 0.35, 4
+            if (cr, cc) in comp_set
+        )
+
+        if (
+            n_pix >= 9
+            and aspect < 1.28
+            and 0.55 <= fill_ratio <= 0.86
+            and max_r <= 0.95
+            and abs(span_x - span_y) <= 2.2 * res
+            and bbox_corners_occupied == 0
+            and (std_r / max(mean_r, 1e-6)) < 0.36
+        ):
+            expected_disc_r = math.sqrt((n_pix * res * res) / math.pi)
+            cyl_idx += 1
+            radius = max(expected_disc_r, res * 1.2)
+            nodes.append(
+                create_primitive_node(
+                    name=f"pgm_columna_{cyl_idx}",
+                    shape="cylinder",
+                    pose=[
+                        clean_float(cx, 4),
+                        clean_float(cy, 4),
+                        clean_float(wall_height * 0.5, 4),
+                        0.0,
+                        0.0,
+                        0.0,
+                    ],
+                    radius=clean_float(radius, 4),
+                    length=clean_float(wall_height, 4),
+                    color=[0.70, 0.75, 0.82, 1.0],
+                    static=True,
+                    material_preset="concrete",
+                    folder_id="folder_arch",
                 )
-                rw["parts"][0]["size"][0] = rw["archetype_params"]["length"]
-                rw["geometry"]["size"][0] = rw["archetype_params"]["length"]
-            nodes.extend(ring_walls)
+            )
+            continue
+
+        # Case B: Solid Filled Rectangular / Square Block (e.g. a 1m x 1m square pillar or obstacle)
+        # Distinguish from thin walls by requiring both dimensions >= 5 pixels and high fill_ratio >= 0.87
+        px_w = c_max_px - c_min_px + 1
+        px_h = r_max_px - r_min_px + 1
+        if (
+            min(px_w, px_h) >= 5
+            and fill_ratio >= 0.87
+            and bbox_corners_occupied >= 2
+            and max(span_x, span_y) <= 3.5
+        ):
+            cyl_idx += 1
+            nodes.append(
+                create_primitive_node(
+                    name=f"pgm_bloque_cuadrado_{cyl_idx}",
+                    shape="box",
+                    pose=[
+                        clean_float(cx, 4),
+                        clean_float(cy, 4),
+                        clean_float(wall_height * 0.5, 4),
+                        0.0,
+                        0.0,
+                        0.0,
+                    ],
+                    size=[clean_float(span_x, 4), clean_float(span_y, 4), clean_float(wall_height, 4)],
+                    color=[0.72, 0.75, 0.80, 1.0],
+                    static=True,
+                    material_preset="concrete",
+                    folder_id="folder_arch",
+                )
+            )
             continue
 
         # Otherwise mark component pixels into `wall_mask` for skeleton centerline vectorization
@@ -413,11 +434,21 @@ def reconstruct_3d_walls_from_pgm(
     wall_thickness_m = clean_float(max(avg_thick_px * res, 0.15), 3)
 
     def skel_neighbors(pt: Tuple[int, int]) -> List[Tuple[int, int]]:
+        """
+        Mixed 4/8-connectivity (m-connectivity):
+        - Connect 4-orthogonal neighbors directly.
+        - Connect diagonal neighbors ONLY when neither shared orthogonal neighbor is present,
+          preventing 3-pixel staircase triangles from creating false degree-3 junctions!
+        """
         r, c = pt
-        out = []
-        for dr, dc in dirs8:
+        out: List[Tuple[int, int]] = []
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             nb = (r + dr, c + dc)
             if nb in skel_pts:
+                out.append(nb)
+        for dr, dc in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
+            nb = (r + dr, c + dc)
+            if nb in skel_pts and (r + dr, c) not in skel_pts and (r, c + dc) not in skel_pts:
                 out.append(nb)
         return out
 
@@ -472,38 +503,140 @@ def reconstruct_3d_walls_from_pgm(
                 prev, curr = curr, nxt
             chains.append(chain)
 
-    # 3. Classify each chain into straight walls vs smooth curved walls
+    # 3. Simplify each chain while strictly preserving straight walls & 90° corners,
+    #    and smoothing ONLY actual curved sub-arcs (short segments with gradual turns).
     for chain in chains:
         if len(chain) < 2:
             continue
         world_chain = [pixel_to_world(r, c) for r, c in chain]
-        is_closed = len(chain) >= 4 and chain[0] == chain[-1]
+        is_closed = len(world_chain) >= 4 and world_chain[0] == world_chain[-1]
 
-        # First pass RDP with tight tolerance (1.35 * res) to remove pixel staircase
-        simplified = _rdp_simplify(world_chain, epsilon=res * 1.35)
+        # For closed loops, rotate open_ring so index 0 sits in the middle of a straight segment
+        # rather than on a corner chamfer, then split at the farthest vertex for RDP.
+        if is_closed:
+            open_ring = world_chain[:-1]
+            n_ring = len(open_ring)
+            if n_ring >= 12:
+                step_k = max(2, min(6, n_ring // 12))
+                best_start = 0
+                best_straight_score = -1.0
+                for idx_r in range(n_ring):
+                    p_b = open_ring[(idx_r - step_k) % n_ring]
+                    p_m = open_ring[idx_r]
+                    p_f = open_ring[(idx_r + step_k) % n_ring]
+                    a1 = math.atan2(p_m[1] - p_b[1], p_m[0] - p_b[0])
+                    a2 = math.atan2(p_f[1] - p_m[1], p_f[0] - p_m[0])
+                    turn = abs((a2 - a1 + math.pi) % (2.0 * math.pi) - math.pi)
+                    span = math.hypot(p_f[0] - p_b[0], p_f[1] - p_b[1])
+                    score = span - turn * 10.0 * res
+                    if score > best_straight_score:
+                        best_straight_score = score
+                        best_start = idx_r
+                open_ring = open_ring[best_start:] + open_ring[:best_start]
+            x0, y0 = open_ring[0]
+            far_idx = max(
+                range(1, len(open_ring)),
+                key=lambda idx: math.hypot(open_ring[idx][0] - x0, open_ring[idx][1] - y0),
+            )
+            half1 = _rdp_simplify(open_ring[: far_idx + 1], epsilon=res * 1.45)
+            half2 = _rdp_simplify(open_ring[far_idx:] + [open_ring[0]], epsilon=res * 1.45)
+            simplified = half1[:-1] + half2
+        else:
+            simplified = _rdp_simplify(world_chain, epsilon=res * 1.45)
+
         if len(simplified) < 2:
             continue
 
-        # Check if the chain has curved sections (consecutive segments turning smoothly)
-        is_curved = False
-        if len(simplified) >= 4:
-            turn_angles = []
-            for i in range(len(simplified) - 2):
-                a1 = math.atan2(simplified[i + 1][1] - simplified[i][1], simplified[i + 1][0] - simplified[i][0])
-                a2 = math.atan2(simplified[i + 2][1] - simplified[i + 1][1], simplified[i + 2][0] - simplified[i + 1][0])
-                diff = abs((a2 - a1 + math.pi) % (2.0 * math.pi) - math.pi)
-                turn_angles.append(math.degrees(diff))
-            # If multiple consecutive turns are between 6° and 55° (smooth arc rather than 90° room corner)
-            smooth_turns = [ang for ang in turn_angles if 6.0 <= ang <= 55.0]
-            if len(smooth_turns) >= 2:
-                is_curved = True
+        # Remove tiny 1-2 pixel skeleton corner chamfers between long straight walls
+        cleaned_pts: List[Tuple[float, float]] = [simplified[0]]
+        idx_p = 1
+        while idx_p < len(simplified) - 1:
+            p_prev = cleaned_pts[-1]
+            p_curr = simplified[idx_p]
+            p_next = simplified[idx_p + 1]
+            d_prev = math.hypot(p_curr[0] - p_prev[0], p_curr[1] - p_prev[1])
+            d_next = math.hypot(p_next[0] - p_curr[0], p_next[1] - p_curr[1])
+            # If this is a tiny chamfer segment (< 3.2 * res) adjacent to a long straight wall (> 7 * res),
+            # project the corner cleanly instead of keeping a 45° mini-bevel.
+            if d_next <= res * 3.2 and d_prev >= res * 7.0 and idx_p + 2 < len(simplified):
+                p_after = simplified[idx_p + 2]
+                d_after = math.hypot(p_after[0] - p_next[0], p_after[1] - p_next[1])
+                if d_after >= res * 7.0:
+                    dx1, dy1 = abs(p_curr[0] - p_prev[0]), abs(p_curr[1] - p_prev[1])
+                    dx2, dy2 = abs(p_after[0] - p_next[0]), abs(p_after[1] - p_next[1])
+                    if dx1 > 3.0 * dy1 and dy2 > 3.0 * dx2:
+                        cleaned_pts.append((p_after[0], p_prev[1]))
+                        idx_p += 2
+                        continue
+                    if dy1 > 3.0 * dx1 and dx2 > 3.0 * dy2:
+                        cleaned_pts.append((p_prev[0], p_after[1]))
+                        idx_p += 2
+                        continue
+            cleaned_pts.append(p_curr)
+            idx_p += 1
+        cleaned_pts.append(simplified[-1])
 
-        if is_curved:
-            # Smooth curve with Chaikin corner cutting and simplify gently
-            final_pts = _rdp_simplify(_chaikin_smooth_curve(simplified, closed=is_closed), epsilon=res * 0.75)
-        else:
-            # Straight walls (including diagonal walls at any angle!)
-            final_pts = _rdp_simplify(simplified, epsilon=res * 1.85)
+        # Merge nearly collinear consecutive segments (angle diff < 6.5°)
+        merged_pts: List[Tuple[float, float]] = [cleaned_pts[0]]
+        for k in range(1, len(cleaned_pts) - 1):
+            pa = merged_pts[-1]
+            pb = cleaned_pts[k]
+            pc = cleaned_pts[k + 1]
+            ang1 = math.atan2(pb[1] - pa[1], pb[0] - pa[0])
+            ang2 = math.atan2(pc[1] - pb[1], pc[0] - pb[0])
+            diff_deg = math.degrees(abs((ang2 - ang1 + math.pi) % (2.0 * math.pi) - math.pi))
+            if diff_deg < 6.5:
+                continue
+            merged_pts.append(pb)
+        merged_pts.append(cleaned_pts[-1])
+
+        # If closed loop and start/end seam lies on a collinear straight wall, merge the seam at corner 1
+        if is_closed and len(merged_pts) >= 4 and merged_pts[0] == merged_pts[-1]:
+            p_last = merged_pts[-2]
+            p_seam = merged_pts[0]
+            p_first = merged_pts[1]
+            ang1 = math.atan2(p_seam[1] - p_last[1], p_seam[0] - p_last[0])
+            ang2 = math.atan2(p_first[1] - p_seam[1], p_first[0] - p_seam[0])
+            seam_diff = math.degrees(abs((ang2 - ang1 + math.pi) % (2.0 * math.pi) - math.pi))
+            if seam_diff < 6.5:
+                merged_pts = merged_pts[1:-1] + [merged_pts[1]]
+
+        # Identify which internal vertices belong to a smooth curve vs a sharp straight-wall corner:
+        # A vertex `k` is a curve vertex ONLY if both adjacent segments are relatively short (< 14 * res)
+        # AND the turn angle at `k` is gradual (6° <= turn <= 52°).
+        # Long straight walls (>= 14 * res) NEVER have their endpoints moved by Chaikin!
+        n_m = len(merged_pts)
+        is_curve_vertex = [False] * n_m
+        for k in range(1, n_m - 1):
+            pa, pb, pc = merged_pts[k - 1], merged_pts[k], merged_pts[k + 1]
+            len_a = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+            len_b = math.hypot(pc[0] - pb[0], pc[1] - pb[1])
+            ang1 = math.atan2(pb[1] - pa[1], pb[0] - pa[0])
+            ang2 = math.atan2(pc[1] - pb[1], pc[0] - pb[0])
+            turn_deg = math.degrees(abs((ang2 - ang1 + math.pi) % (2.0 * math.pi) - math.pi))
+            if 6.0 <= turn_deg <= 55.0 and len_a < res * 16.0 and len_b < res * 16.0:
+                is_curve_vertex[k] = True
+
+        # Smooth ONLY contiguous runs of curve vertices; keep straight wall vertices 100% intact
+        final_pts: List[Tuple[float, float]] = []
+        k = 0
+        while k < n_m:
+            if not is_curve_vertex[k]:
+                final_pts.append(merged_pts[k])
+                k += 1
+            else:
+                run_start = max(0, k - 1)
+                while k < n_m and is_curve_vertex[k]:
+                    k += 1
+                run_end = min(n_m - 1, k)
+                sub_arc = merged_pts[run_start : run_end + 1]
+                smoothed_arc = _rdp_simplify(
+                    _chaikin_smooth_curve(sub_arc, closed=False), epsilon=res * 0.65
+                )
+                # Append smoothed interior points (run_start is already at final_pts[-1])
+                for sp in smoothed_arc[1:]:
+                    final_pts.append(sp)
+                k = run_end + 1
 
         for i in range(len(final_pts) - 1):
             x0, y0 = final_pts[i]
@@ -514,16 +647,17 @@ def reconstruct_3d_walls_from_pgm(
             if seg_len < max(res * 1.5, 0.08):
                 continue
 
+            seg_is_curved = seg_len < res * 15.0
             wall_idx += 1
             mx = (x0 + x1) * 0.5
             my = (y0 + y1) * 0.5
             yaw = math.atan2(dy, dx)
             # Add slight corner overlap so angled and curved joints meet cleanly with zero gaps
-            eff_len = seg_len + wall_thickness_m * (0.40 if is_curved else 0.25)
+            eff_len = seg_len + wall_thickness_m * (0.38 if seg_is_curved else 0.25)
 
             w_node = create_archetype_node(
                 archetype="wall",
-                name=f"pgm_muro_{'curvo' if is_curved else 'recto'}_{wall_idx}",
+                name=f"pgm_muro_{'curvo' if seg_is_curved else 'recto'}_{wall_idx}",
                 pose=[
                     clean_float(mx, 4),
                     clean_float(my, 4),

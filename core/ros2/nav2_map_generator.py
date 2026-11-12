@@ -103,7 +103,7 @@ def collect_slice_primitives(
         if isinstance(parts, list) and len(parts) > 0:
             for part in parts:
                 p_shape = part.get("shape", "box")
-                p_pose = part.get("pose", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                p_pose = part.get("local_pose", part.get("pose", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
                 if p_shape == "cylinder":
                     r = float(part.get("radius", 0.1))
                     l = float(part.get("length", 1.0))

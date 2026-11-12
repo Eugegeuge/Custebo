@@ -291,6 +291,12 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         pass
 
+    def end_headers(self) -> None:
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
     def _send_json(self, payload: Dict[str, Any], status: int = HTTPStatus.OK) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -581,10 +587,8 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
             node_ids = list(body.get("node_ids", []))
             if not node_ids and body.get("node_id"):
                 node_ids = [str(body["node_id"])]
-            raw_gz = body.get("ground_z")
-            ground_z = float(raw_gz) if isinstance(raw_gz, (int, float)) else None
             for nid in node_ids:
-                SESSION.manager.execute(DropToGroundCommand(nid, ground_z=ground_z))
+                SESSION.manager.execute(DropToGroundCommand(nid, ground_z=None))
 
         elif cmd_type == "snap_to_neighbor":
             node_id = str(body["node_id"])
@@ -596,6 +600,22 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
         elif cmd_type == "stack_on_neighbor":
             node_id = str(body["node_id"])
             support_id = body.get("support_node_id")
+            if support_id:
+                support_id_str = str(support_id)
+                n_top = SESSION.manager.doc.get_node(node_id)
+                n_base = SESSION.manager.doc.get_node(support_id_str)
+                if n_top and n_base:
+                    from core.procedural.spatial_tools import get_node_world_aabb
+                    tmin, tmax = get_node_world_aabb(n_top)
+                    bmin, bmax = get_node_world_aabb(n_base)
+                    area_top = (tmax[0] - tmin[0]) * (tmax[1] - tmin[1])
+                    area_base = (bmax[0] - bmin[0]) * (bmax[1] - bmin[1])
+                    # If the user selected a small/dynamic object first and then Shift+Clicked a larger/static
+                    # support object (like a table or pallet), put the small object on top of the larger one!
+                    if (n_top.get("static") and not n_base.get("static")) or (area_top > area_base * 1.35):
+                        node_id, support_id_str = support_id_str, node_id
+                support_id = support_id_str
+
             new_pose = stack_node_on_target_or_nearest(
                 SESSION.manager.doc,
                 node_id=node_id,
@@ -604,6 +624,7 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
             SESSION.manager.execute(
                 BatchUpdatePosesCommand({node_id: new_pose}, label=f"Stack '{node_id}' on Top")
             )
+            created_node_id = node_id
 
         elif cmd_type == "align_distribute":
             node_ids = list(body.get("node_ids", []))
@@ -902,8 +923,47 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
             for y in range(20, 141):
                 pixels[y * w_px + 20] = 0  # Left straight wall
             # Smooth semicircular curved wall on the right side (center=(145, 80), R=60 px)
-            for deg in range(-90, 91):
-                rad = _m.radians(deg)
+            for deg in range(-900, 901):
+                rad = _m.radians(deg * 0.1)
+                cx_p = int(round(145 + 34 * _m.cos(rad)))
+                cy_p = int(round(80 + 60 * _m.sin(rad)))
+                if 0 <= cx_p < w_px and 0 <= cy_p < h_px:
+                    pixels[cy_p * w_px + cx_p] = 0
+            # Interior divider wall
+            for y in range(20, 88):
+                pixels[y * w_px + 95] = 0
+            # Solid circular pillar at (60, 105) with radius 6 px (0.30 m)
+            for py in range(98, 113):
+                for px in range(53, 68):
+                    if _m.hypot(px - 60, py - 105) <= 5.5:
+                        pixels[py * w_px + px] = 0
+            raw_bytes = f"P5\n{w_px} {h_px}\n255\n".encode("ascii") + bytes(pixels)
+        else:
+            b64_data = str(body.get("content_base64", body.get("pgm_base64", "")))
+            if not b64_data:
+                self._send_json({"ok": False, "error": "Archivo PGM vacío."}, HTTPStatus.BAD_REQUEST)
+                return
+            raw_bytes = base64.b64decode(b64_data)
+
+
+        if body.get("use_demo_slam"):
+            # Synthesize a 200x160 (10m x 8m at 0.05m/px) SLAM floorplan PGM with:
+            # - Straight outer walls & interior divider
+            # - A smooth curved semicircular bay wall on the right
+            # - A circular structural pillar in the main hall
+            import math as _m
+
+            w_px, h_px = 200, 160
+            pixels = bytearray([254] * (w_px * h_px))
+            for x in range(20, 145):
+                pixels[20 * w_px + x] = 0  # Top straight wall
+                if not (80 <= x <= 108):
+                    pixels[140 * w_px + x] = 0  # Bottom straight wall with doorway
+            for y in range(20, 141):
+                pixels[y * w_px + 20] = 0  # Left straight wall
+            # Smooth semicircular curved wall on the right side (center=(145, 80), R=60 px)
+            for deg in range(-900, 901):
+                rad = _m.radians(deg * 0.1)
                 cx_p = int(round(145 + 34 * _m.cos(rad)))
                 cy_p = int(round(80 + 60 * _m.sin(rad)))
                 if 0 <= cx_p < w_px and 0 <= cy_p < h_px:

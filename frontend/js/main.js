@@ -177,20 +177,30 @@ class CusteboStudioApp {
     this.raycaster = new THREE.Raycaster();
     this.pointerDownPos = new THREE.Vector2();
 
-    this.renderer.domElement.addEventListener("pointerdown", (e) => {
-      this.pointerDownPos.set(e.clientX, e.clientY);
-      if (
-        e.button === 0 &&
-        !this.isDraggingGizmo &&
-        (this.activeViewportTool === "boxselect" || e.shiftKey)
-      ) {
-        this.boxSelectStart = { x: e.clientX, y: e.clientY };
-        this.isBoxSelecting = false;
-        this.orbitControls.enabled = false;
-      }
-    });
+    // Capture-phase pointerdown runs BEFORE OrbitControls so Shift+Click, Ctrl+Click, and Marquee Box Drag
+    // are never hijacked by OrbitControls camera pan/rotate!
+    this.renderer.domElement.addEventListener(
+      "pointerdown",
+      (e) => {
+        this.pointerDownPos.set(e.clientX, e.clientY);
+        if (
+          e.button === 0 &&
+          !this.isDraggingGizmo &&
+          (this.activeViewportTool === "boxselect" || e.shiftKey || e.ctrlKey || e.metaKey)
+        ) {
+          this.orbitControls.enabled = false;
+          this.boxSelectStart = {
+            x: e.clientX,
+            y: e.clientY,
+            additive: Boolean(e.shiftKey || e.ctrlKey || e.metaKey),
+          };
+          this.isBoxSelecting = false;
+        }
+      },
+      { capture: true }
+    );
 
-    this.renderer.domElement.addEventListener("pointermove", (e) => {
+    window.addEventListener("pointermove", (e) => {
       if (this.boxSelectStart && !this.isDraggingGizmo) {
         const dist = Math.hypot(e.clientX - this.boxSelectStart.x, e.clientY - this.boxSelectStart.y);
         if (dist >= 6) {
@@ -199,10 +209,12 @@ class CusteboStudioApp {
           return;
         }
       }
-      this._handleViewportPointerMove(e);
+      if (e.target === this.renderer.domElement) {
+        this._handleViewportPointerMove(e);
+      }
     });
 
-    this.renderer.domElement.addEventListener("pointerup", (e) => {
+    window.addEventListener("pointerup", (e) => {
       if (this.boxSelectStart) {
         const wasBox = this.isBoxSelecting;
         const startPt = this.boxSelectStart;
@@ -211,13 +223,22 @@ class CusteboStudioApp {
         this.orbitControls.enabled = true;
         document.getElementById("selection-marquee-box")?.classList.add("hidden");
         if (wasBox) {
-          this._finishMarqueeBoxSelection(startPt.x, startPt.y, e.clientX, e.clientY, e.shiftKey);
+          this._finishMarqueeBoxSelection(
+            startPt.x,
+            startPt.y,
+            e.clientX,
+            e.clientY,
+            Boolean(startPt.additive || e.shiftKey || e.ctrlKey || e.metaKey)
+          );
           return;
         }
+      } else if (!this.isDraggingGizmo) {
+        this.orbitControls.enabled = true;
       }
+      if (e.target !== this.renderer.domElement) return;
       if (e.button !== 0 || this.isDraggingGizmo) return;
       const dist = Math.hypot(e.clientX - this.pointerDownPos.x, e.clientY - this.pointerDownPos.y);
-      if (dist < 5) {
+      if (dist < 6) {
         this._handleViewportClick(e);
       }
     });
@@ -484,6 +505,29 @@ class CusteboStudioApp {
       const routeGeom = new THREE.BufferGeometry().setFromPoints(wpPoints);
       const routeMat = new THREE.LineBasicMaterial({ color: 0x06b6d4, linewidth: 2 });
       this.nodesRootGroup.add(new THREE.Line(routeGeom, routeMat));
+    }
+
+    // Draw unmistakable 3D Selection Bounding Boxes for all selected objects (and a combined group box)
+    const combinedBox = new THREE.Box3();
+    let combinedCount = 0;
+    for (const selId of this.selectedNodeIds) {
+      const grp = this.nodeObjectMap.get(selId);
+      if (!grp || !grp.visible) continue;
+      grp.updateMatrixWorld(true);
+      const b3 = new THREE.Box3().setFromObject(grp);
+      if (!b3.isEmpty()) {
+        b3.expandByScalar(0.02);
+        const isPrimary = selId === this.selectedNodeId;
+        const helperColor =
+          this.selectedNodeIds.size > 1 ? (isPrimary ? 0x38bdf8 : 0xc084fc) : 0x38bdf8;
+        this.nodesRootGroup.add(new THREE.Box3Helper(b3, helperColor));
+        combinedBox.union(b3);
+        combinedCount++;
+      }
+    }
+    if (combinedCount >= 2 && !combinedBox.isEmpty()) {
+      const unionBox = combinedBox.clone().expandByScalar(0.06);
+      this.nodesRootGroup.add(new THREE.Box3Helper(unionBox, 0xfacc15));
     }
 
     if (this.selectedNodeId) {
@@ -1357,7 +1401,7 @@ class CusteboStudioApp {
 
   _handleViewportClick(event) {
     // Interactive 3D Viewport Tools: Floorplan Wall Tracer, 3D Laser Ruler, Spline Tracer, Scatter Brush, Waypoint
-    if (this.activeViewportTool) {
+    if (this.activeViewportTool && this.activeViewportTool !== "boxselect") {
       const pt = this._raycastGroundOrSurface(event, this.activeViewportTool === "ruler");
       if (!pt) return;
 
@@ -1491,11 +1535,45 @@ class CusteboStudioApp {
       if (node.type === "ground_plane" || node.locked || node.visible === false) continue;
       const grp = this.nodeObjectMap.get(node.id);
       if (!grp || !grp.visible) continue;
-      const proj = grp.position.clone().project(this.activeCamera);
-      if (proj.z < -1 || proj.z > 1) continue;
-      const sx = ((proj.x + 1) * 0.5) * rect.width;
-      const sy = ((-proj.y + 1) * 0.5) * rect.height;
-      if (sx >= minX && sx <= maxX && sy >= minY && sy <= maxY) {
+      grp.updateMatrixWorld(true);
+
+      const box3 = new THREE.Box3().setFromObject(grp);
+      const testPts = [grp.position.clone()];
+      if (!box3.isEmpty()) {
+        const bMin = box3.min;
+        const bMax = box3.max;
+        testPts.push(
+          new THREE.Vector3(bMin.x, bMin.y, bMin.z),
+          new THREE.Vector3(bMax.x, bMin.y, bMin.z),
+          new THREE.Vector3(bMin.x, bMax.y, bMin.z),
+          new THREE.Vector3(bMax.x, bMax.y, bMin.z),
+          new THREE.Vector3(bMin.x, bMin.y, bMax.z),
+          new THREE.Vector3(bMax.x, bMin.y, bMax.z),
+          new THREE.Vector3(bMin.x, bMax.y, bMax.z),
+          new THREE.Vector3(bMax.x, bMax.y, bMax.z)
+        );
+      }
+
+      let sMinX = 1e9;
+      let sMaxX = -1e9;
+      let sMinY = 1e9;
+      let sMaxY = -1e9;
+      let anyInFront = false;
+
+      for (const pt of testPts) {
+        const proj = pt.project(this.activeCamera);
+        if (proj.z >= -1 && proj.z <= 1) {
+          anyInFront = true;
+          const sx = (proj.x + 1) * 0.5 * rect.width;
+          const sy = (-proj.y + 1) * 0.5 * rect.height;
+          if (sx < sMinX) sMinX = sx;
+          if (sx > sMaxX) sMaxX = sx;
+          if (sy < sMinY) sMinY = sy;
+          if (sy > sMaxY) sMaxY = sy;
+        }
+      }
+
+      if (anyInFront && sMaxX >= minX && sMinX <= maxX && sMaxY >= minY && sMinY <= maxY) {
         this.selectedNodeIds.add(node.id);
       }
     }
@@ -1504,7 +1582,9 @@ class CusteboStudioApp {
     this.selectedNodeId = idsArr.length > 0 ? idsArr[idsArr.length - 1] : null;
     this._refreshSelectionUI();
     if (idsArr.length > 0) {
-      this._setStatus(`🔲 ${idsArr.length} objeto(s) seleccionado(s) en caja. Usa G/R para moverlos juntos o '🔗 Agrupar (Ctrl+G)'.`);
+      this._setStatus(
+        `🔲 ${idsArr.length} objeto(s) seleccionado(s) en caja. Usa G/R para moverlos juntos o '🔗 Agrupar (Ctrl+G)'.`
+      );
     }
   }
 
@@ -1684,8 +1764,12 @@ class CusteboStudioApp {
 
       for (const node of folderNodes) {
         const isSel = node.id === this.selectedNodeId || this.selectedNodeIds.has(node.id);
+        const isMulti = this.selectedNodeIds.size > 1 && this.selectedNodeIds.has(node.id);
         const item = document.createElement("div");
-        item.className = "outliner-item" + (isSel ? " selected" : "");
+        item.className =
+          "outliner-item" +
+          (isSel ? " selected" : "") +
+          (isMulti && node.id !== this.selectedNodeId ? " multi-selected" : "");
 
         const archIcons = {
           wall: "🧱",
@@ -1732,9 +1816,47 @@ class CusteboStudioApp {
 
         const nameSpan = document.createElement("div");
         nameSpan.className = "outliner-item-name";
-        nameSpan.innerHTML = `<span>${icon}</span><span>${node.name}</span>`;
-        nameSpan.addEventListener("click", (e) => {
-          const toggleMulti = Boolean(e.shiftKey || e.ctrlKey || e.metaKey || this.activeViewportTool === "boxselect");
+
+        // Direct multi-select checkbox so users can check multiple objects effortlessly
+        if (node.type !== "ground_plane" && node.type !== "light" && !node.locked) {
+          const chk = document.createElement("input");
+          chk.type = "checkbox";
+          chk.className = "outliner-multi-chk";
+          chk.checked = isSel;
+          chk.title = "Marcar/desmarcar para multiselección (o usa Shift/Ctrl + Clic)";
+          chk.addEventListener("click", (e) => {
+            e.stopPropagation();
+            this.selectNode(node.id, true);
+          });
+          nameSpan.appendChild(chk);
+        }
+
+        const iconAndLabel = document.createElement("span");
+        iconAndLabel.innerHTML = `${icon} ${node.name}`;
+        nameSpan.appendChild(iconAndLabel);
+
+        item.addEventListener("click", (e) => {
+          if (e.shiftKey && this.selectedNodeId && this.selectedNodeId !== node.id) {
+            // Range selection in Outliner order + additive toggle
+            const selectableIds = this.sceneGraph.nodes
+              .filter((n) => n.type !== "ground_plane" && !n.locked && n.visible !== false)
+              .map((n) => n.id);
+            const idxA = selectableIds.indexOf(this.selectedNodeId);
+            const idxB = selectableIds.indexOf(node.id);
+            if (idxA !== -1 && idxB !== -1) {
+              const startIdx = Math.min(idxA, idxB);
+              const endIdx = Math.max(idxA, idxB);
+              for (let k = startIdx; k <= endIdx; k++) {
+                this.selectedNodeIds.add(selectableIds[k]);
+              }
+              this.selectedNodeId = node.id;
+              this._refreshSelectionUI();
+              return;
+            }
+          }
+          const toggleMulti = Boolean(
+            e.shiftKey || e.ctrlKey || e.metaKey || this.activeViewportTool === "boxselect"
+          );
           this.selectNode(node.id, toggleMulti);
         });
 

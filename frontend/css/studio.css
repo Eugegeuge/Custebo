@@ -394,11 +394,12 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 5px 8px 5px 16px;
+  padding: 5px 8px 5px 10px;
   border-radius: 4px;
   cursor: pointer;
   margin-top: 2px;
   font-size: 12.5px;
+  user-select: none;
 }
 
 .outliner-item:hover {
@@ -406,10 +407,26 @@ body {
 }
 
 .outliner-item.selected {
-  background: rgba(47, 129, 247, 0.25);
+  background: rgba(47, 129, 247, 0.28);
   border-left: 3px solid var(--accent-blue);
-  padding-left: 13px;
+  padding-left: 7px;
   font-weight: 600;
+}
+
+.outliner-item.multi-selected {
+  background: rgba(168, 85, 247, 0.25);
+  border-left: 3px solid #a855f7;
+  padding-left: 7px;
+  font-weight: 600;
+}
+
+.outliner-multi-chk {
+  width: 13px;
+  height: 13px;
+  margin: 0 3px 0 0;
+  accent-color: #a855f7;
+  cursor: pointer;
+  flex-shrink: 0;
 }
 
 .outliner-item-name {
@@ -419,6 +436,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
 }
 
 .outliner-toggles {
