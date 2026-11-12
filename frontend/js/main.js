@@ -50,6 +50,7 @@ class CusteboStudioApp {
     this.objLoader = new OBJLoader();
 
     this.selectedNodeId = null;
+    this.selectedNodeIds = new Set();
     this.showAnglesInDegrees = true;
     this.cameraMode = "perspective"; // "perspective" | "ortho_top"
     this.debugLayers = {
@@ -61,6 +62,9 @@ class CusteboStudioApp {
     // Map of node_id -> THREE.Group in the 3D scene
     this.nodeObjectMap = new Map();
     this.isDraggingGizmo = false;
+    this.multiDragStart = null;
+    this.boxSelectStart = null;
+    this.isBoxSelecting = false;
     this.activeViewportTool = null;
     this.rulerPoints = [];
     this.floorplanPoints = [];
@@ -137,8 +141,29 @@ class CusteboStudioApp {
     this.transformControls.addEventListener("dragging-changed", (event) => {
       this.orbitControls.enabled = !event.value;
       this.isDraggingGizmo = event.value;
-      if (!event.value && this.selectedNodeId) {
+      if (event.value && this.selectedNodeId) {
+        const primaryGrp = this.nodeObjectMap.get(this.selectedNodeId);
+        if (primaryGrp) {
+          const others = new Map();
+          for (const nid of this.selectedNodeIds) {
+            if (nid === this.selectedNodeId) continue;
+            const g = this.nodeObjectMap.get(nid);
+            if (g && !g.userData.locked) {
+              others.set(nid, {
+                startPos: g.position.clone(),
+                startQuat: g.quaternion.clone(),
+              });
+            }
+          }
+          this.multiDragStart = {
+            primaryStartPos: primaryGrp.position.clone(),
+            primaryStartQuat: primaryGrp.quaternion.clone(),
+            others,
+          };
+        }
+      } else if (!event.value && this.selectedNodeId) {
         this._commitGizmoTransformToBackend();
+        this.multiDragStart = null;
       }
     });
 
@@ -148,19 +173,48 @@ class CusteboStudioApp {
       }
     });
 
-    // Raycaster for clicking & live previewing tools in the 3D scene
+    // Raycaster for clicking, marquee box selection & live previewing tools in the 3D scene
     this.raycaster = new THREE.Raycaster();
     this.pointerDownPos = new THREE.Vector2();
 
     this.renderer.domElement.addEventListener("pointerdown", (e) => {
       this.pointerDownPos.set(e.clientX, e.clientY);
+      if (
+        e.button === 0 &&
+        !this.isDraggingGizmo &&
+        (this.activeViewportTool === "boxselect" || e.shiftKey)
+      ) {
+        this.boxSelectStart = { x: e.clientX, y: e.clientY };
+        this.isBoxSelecting = false;
+        this.orbitControls.enabled = false;
+      }
     });
 
     this.renderer.domElement.addEventListener("pointermove", (e) => {
+      if (this.boxSelectStart && !this.isDraggingGizmo) {
+        const dist = Math.hypot(e.clientX - this.boxSelectStart.x, e.clientY - this.boxSelectStart.y);
+        if (dist >= 6) {
+          this.isBoxSelecting = true;
+          this._updateMarqueeBoxOverlay(this.boxSelectStart.x, this.boxSelectStart.y, e.clientX, e.clientY);
+          return;
+        }
+      }
       this._handleViewportPointerMove(e);
     });
 
     this.renderer.domElement.addEventListener("pointerup", (e) => {
+      if (this.boxSelectStart) {
+        const wasBox = this.isBoxSelecting;
+        const startPt = this.boxSelectStart;
+        this.boxSelectStart = null;
+        this.isBoxSelecting = false;
+        this.orbitControls.enabled = true;
+        document.getElementById("selection-marquee-box")?.classList.add("hidden");
+        if (wasBox) {
+          this._finishMarqueeBoxSelection(startPt.x, startPt.y, e.clientX, e.clientY, e.shiftKey);
+          return;
+        }
+      }
       if (e.button !== 0 || this.isDraggingGizmo) return;
       const dist = Math.hypot(e.clientX - this.pointerDownPos.x, e.clientY - this.pointerDownPos.y);
       if (dist < 5) {
@@ -264,6 +318,7 @@ class CusteboStudioApp {
       if (data.ok) {
         if (data.selected_node_id) {
           this.selectedNodeId = data.selected_node_id;
+          this.selectedNodeIds = new Set([data.selected_node_id]);
         }
         this._applyBackendPayload(data);
       } else {
@@ -305,12 +360,17 @@ class CusteboStudioApp {
       this.presets = data.presets;
     }
 
-    // Verify selectedNodeId still exists
-    if (
-      this.selectedNodeId &&
-      !this.sceneGraph.nodes.some((n) => n.id === this.selectedNodeId)
-    ) {
-      this.selectedNodeId = null;
+    // Verify selectedNodeId and selectedNodeIds still exist
+    const validIds = new Set(this.sceneGraph.nodes.map((n) => n.id));
+    for (const sid of Array.from(this.selectedNodeIds)) {
+      if (!validIds.has(sid)) this.selectedNodeIds.delete(sid);
+    }
+    if (this.selectedNodeId && !validIds.has(this.selectedNodeId)) {
+      const rem = Array.from(this.selectedNodeIds);
+      this.selectedNodeId = rem.length > 0 ? rem[rem.length - 1] : null;
+    }
+    if (this.selectedNodeId && !this.selectedNodeIds.has(this.selectedNodeId)) {
+      this.selectedNodeIds.add(this.selectedNodeId);
     }
 
     // Update topbar controls
@@ -465,7 +525,7 @@ class CusteboStudioApp {
     }
 
     if (node.type === "primitive" || node.type === "include" || node.type === "mesh") {
-      const isSelected = node.id === this.selectedNodeId;
+      const isSelected = node.id === this.selectedNodeId || this.selectedNodeIds.has(node.id);
       const parts = Array.isArray(node.parts) && node.parts.length > 0 ? node.parts : null;
 
       if (node.type === "mesh") {
@@ -1389,28 +1449,103 @@ class CusteboStudioApp {
     });
 
     const hits = this.raycaster.intersectObjects(meshes, false);
+    const toggleMulti = Boolean(
+      event.shiftKey || event.ctrlKey || event.metaKey || this.activeViewportTool === "boxselect"
+    );
     if (hits.length > 0) {
       const hitNodeId = hits[0].object.userData.nodeId;
-      this.selectNode(hitNodeId);
-    } else {
-      this.selectNode(null);
+      this.selectNode(hitNodeId, toggleMulti);
+    } else if (!toggleMulti) {
+      this.selectNode(null, false);
     }
   }
 
-  selectNode(nodeId) {
-    this.selectedNodeId = nodeId;
+  _updateMarqueeBoxOverlay(x0, y0, x1, y1) {
+    const boxEl = document.getElementById("selection-marquee-box");
+    const container = document.getElementById("viewport-container");
+    if (!boxEl || !container) return;
+    const rect = container.getBoundingClientRect();
+    const left = Math.min(x0, x1) - rect.left;
+    const top = Math.min(y0, y1) - rect.top;
+    const width = Math.abs(x1 - x0);
+    const height = Math.abs(y1 - y0);
+    boxEl.style.left = `${left}px`;
+    boxEl.style.top = `${top}px`;
+    boxEl.style.width = `${width}px`;
+    boxEl.style.height = `${height}px`;
+    boxEl.classList.remove("hidden");
+  }
+
+  _finishMarqueeBoxSelection(x0, y0, x1, y1, additive = false) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const minX = Math.min(x0, x1) - rect.left;
+    const maxX = Math.max(x0, x1) - rect.left;
+    const minY = Math.min(y0, y1) - rect.top;
+    const maxY = Math.max(y0, y1) - rect.top;
+
+    if (!additive) {
+      this.selectedNodeIds.clear();
+    }
+
+    for (const node of this.sceneGraph?.nodes || []) {
+      if (node.type === "ground_plane" || node.locked || node.visible === false) continue;
+      const grp = this.nodeObjectMap.get(node.id);
+      if (!grp || !grp.visible) continue;
+      const proj = grp.position.clone().project(this.activeCamera);
+      if (proj.z < -1 || proj.z > 1) continue;
+      const sx = ((proj.x + 1) * 0.5) * rect.width;
+      const sy = ((-proj.y + 1) * 0.5) * rect.height;
+      if (sx >= minX && sx <= maxX && sy >= minY && sy <= maxY) {
+        this.selectedNodeIds.add(node.id);
+      }
+    }
+
+    const idsArr = Array.from(this.selectedNodeIds);
+    this.selectedNodeId = idsArr.length > 0 ? idsArr[idsArr.length - 1] : null;
+    this._refreshSelectionUI();
+    if (idsArr.length > 0) {
+      this._setStatus(`🔲 ${idsArr.length} objeto(s) seleccionado(s) en caja. Usa G/R para moverlos juntos o '🔗 Agrupar (Ctrl+G)'.`);
+    }
+  }
+
+  selectNode(nodeId, toggleMulti = false) {
+    if (!nodeId) {
+      if (!toggleMulti) {
+        this.selectedNodeId = null;
+        this.selectedNodeIds.clear();
+      }
+    } else if (toggleMulti) {
+      if (this.selectedNodeIds.has(nodeId) && this.selectedNodeIds.size > 1) {
+        this.selectedNodeIds.delete(nodeId);
+        const rem = Array.from(this.selectedNodeIds);
+        this.selectedNodeId = rem[rem.length - 1] || null;
+      } else {
+        this.selectedNodeIds.add(nodeId);
+        this.selectedNodeId = nodeId;
+      }
+    } else {
+      this.selectedNodeId = nodeId;
+      this.selectedNodeIds = new Set([nodeId]);
+    }
+    this._refreshSelectionUI();
+  }
+
+  _refreshSelectionUI() {
     this._rebuild3DSceneFromGraph();
     this._renderOutliner();
     this._renderInspector();
     this._highlightSelectedNodeInXml();
 
     const hudEl = document.getElementById("hud-selection-info");
+    const count = this.selectedNodeIds.size;
     const node = this._getSelectedNode();
-    if (node) {
+    if (count > 1) {
+      hudEl.innerHTML = `🔲 Multiselección: <b>${count} objetos</b> (Pulsa <b>🔗 Agrupar</b> o mueve con el Gizmo)`;
+    } else if (node) {
       const p = node.pose || [0, 0, 0, 0, 0, 0];
       hudEl.innerHTML = `Seleccionado: <b>${node.name}</b> [${p[0].toFixed(2)}, ${p[1].toFixed(2)}, ${p[2].toFixed(2)} m]`;
     } else {
-      hudEl.textContent = "Ningún objeto seleccionado";
+      hudEl.textContent = "Ningún objeto seleccionado (Shift+Clic para multiselección)";
     }
   }
 
@@ -1423,6 +1558,39 @@ class CusteboStudioApp {
     const group = this.nodeObjectMap.get(this.selectedNodeId);
     const node = this._getSelectedNode();
     if (!group || !node) return;
+
+    // If multi-selection is active, move/rotate all other selected objects by the same delta!
+    if (this.multiDragStart && this.multiDragStart.others.size > 0) {
+      const dx = group.position.x - this.multiDragStart.primaryStartPos.x;
+      const dy = group.position.y - this.multiDragStart.primaryStartPos.y;
+      const dz = group.position.z - this.multiDragStart.primaryStartPos.z;
+      const deltaQuat = group.quaternion
+        .clone()
+        .multiply(this.multiDragStart.primaryStartQuat.clone().invert());
+
+      for (const [otherId, st] of this.multiDragStart.others.entries()) {
+        const og = this.nodeObjectMap.get(otherId);
+        const onode = this.sceneGraph?.nodes?.find((n) => n.id === otherId);
+        if (!og || !onode) continue;
+        if (this.transformControls.mode === "rotate") {
+          const relOffset = st.startPos.clone().sub(this.multiDragStart.primaryStartPos);
+          relOffset.applyQuaternion(deltaQuat);
+          og.position.copy(this.multiDragStart.primaryStartPos).add(relOffset);
+          og.quaternion.copy(deltaQuat).multiply(st.startQuat);
+        } else {
+          og.position.set(st.startPos.x + dx, st.startPos.y + dy, st.startPos.z + dz);
+        }
+        const oEuler = new THREE.Euler().setFromQuaternion(og.quaternion, "ZYX");
+        onode.pose = [
+          Number(og.position.x.toFixed(4)),
+          Number(og.position.y.toFixed(4)),
+          Number(og.position.z.toFixed(4)),
+          Number(oEuler.x.toFixed(4)),
+          Number(oEuler.y.toFixed(4)),
+          Number(oEuler.z.toFixed(4)),
+        ];
+      }
+    }
 
     const eulerZyx = new THREE.Euler().setFromQuaternion(group.quaternion, "ZYX");
     node.pose = [
@@ -1445,6 +1613,29 @@ class CusteboStudioApp {
     const group = this.nodeObjectMap.get(this.selectedNodeId);
     const node = this._getSelectedNode();
     if (!group || !node) return;
+
+    if (this.selectedNodeIds.size > 1) {
+      const posesMap = {};
+      for (const nid of this.selectedNodeIds) {
+        const g = this.nodeObjectMap.get(nid);
+        if (!g) continue;
+        const eul = new THREE.Euler().setFromQuaternion(g.quaternion, "ZYX");
+        posesMap[nid] = [
+          Number(g.position.x.toFixed(6)),
+          Number(g.position.y.toFixed(6)),
+          Number(g.position.z.toFixed(6)),
+          Number(eul.x.toFixed(6)),
+          Number(eul.y.toFixed(6)),
+          Number(eul.z.toFixed(6)),
+        ];
+      }
+      await this.sendCommand({
+        type: "batch_update_poses",
+        poses_map: posesMap,
+        label: `Transform ${Object.keys(posesMap).length} selected objects`,
+      });
+      return;
+    }
 
     const eulerZyx = new THREE.Euler().setFromQuaternion(group.quaternion, "ZYX");
     const newPose = [
@@ -1492,8 +1683,9 @@ class CusteboStudioApp {
       );
 
       for (const node of folderNodes) {
+        const isSel = node.id === this.selectedNodeId || this.selectedNodeIds.has(node.id);
         const item = document.createElement("div");
-        item.className = "outliner-item" + (node.id === this.selectedNodeId ? " selected" : "");
+        item.className = "outliner-item" + (isSel ? " selected" : "");
 
         const archIcons = {
           wall: "🧱",
@@ -1503,6 +1695,13 @@ class CusteboStudioApp {
           column_square: "🏛",
           stairs: "🪜",
           ramp: "📐",
+          road_straight: "🛣",
+          road_curved: "↪",
+          road_intersection: "➕",
+          road_crosswalk: "🦓",
+          roundabout: "🔄",
+          speed_bump: "〰",
+          custom_group: "🔗",
           warehouse_rack: "🗄",
           table: "🪑",
           euro_pallet: "🪵",
@@ -1534,7 +1733,10 @@ class CusteboStudioApp {
         const nameSpan = document.createElement("div");
         nameSpan.className = "outliner-item-name";
         nameSpan.innerHTML = `<span>${icon}</span><span>${node.name}</span>`;
-        nameSpan.addEventListener("click", () => this.selectNode(node.id));
+        nameSpan.addEventListener("click", (e) => {
+          const toggleMulti = Boolean(e.shiftKey || e.ctrlKey || e.metaKey || this.activeViewportTool === "boxselect");
+          this.selectNode(node.id, toggleMulti);
+        });
 
         const toggles = document.createElement("div");
         toggles.className = "outliner-toggles";
@@ -1604,8 +1806,25 @@ class CusteboStudioApp {
     const rDisp = (pose[3] * factor).toFixed(2);
     const pDisp = (pose[4] * factor).toFixed(2);
     const yDisp = (pose[5] * factor).toFixed(2);
+    const multiCount = (this.selectedNodeIds || new Set()).size;
 
-    let html = `
+    let html = "";
+    if (multiCount >= 2) {
+      html += `
+      <!-- MULTI-SELECTION & GROUPING CARD -->
+      <div class="insp-card" style="border-color:rgba(167,139,250,0.45);background:rgba(167,139,250,0.08);">
+        <div class="insp-card-title" style="color:#c4b5fd;">🔲 Multiselección Activa (${multiCount} objetos)</div>
+        <div style="font-size:11px;color:var(--text-secondary);line-height:1.35;">
+          El Gizmo 3D mueve y rota los <b>${multiCount} objetos a la vez</b>. También puedes agruparlos en un único bloque o apilar el último sobre el primero.
+        </div>
+        <div class="palette-grid" style="margin-top:4px;">
+          <button id="btn-insp-group" class="palette-btn" title="Fusiona los ${multiCount} objetos seleccionados en un único objeto compuesto (Ctrl+G)">🔗 Agrupar en 1 Bloque</button>
+          <button id="btn-insp-stack" class="palette-btn" title="Coloca el objeto activo justo ENCIMA del otro objeto seleccionado (Tecla B)">⬆️ Apilar Encima (B)</button>
+        </div>
+      </div>`;
+    }
+
+    html += `
       <!-- IDENTITY CARD -->
       <div class="insp-card">
         <div class="insp-card-title">Identidad y Estado</div>
@@ -1677,6 +1896,12 @@ class CusteboStudioApp {
         top_width: "Ancho Superior (m)",
         base_width: "Ancho Base (m)",
         radius: "Radio (m)",
+        curb_width: "Ancho Acera/Bordillo (m)",
+        angle_deg: "Ángulo Curva (°)",
+        arm_length: "Largo Ramal (m)",
+        stripes: "Nº Franjas Cebra",
+        outer_radius: "Radio Exterior (m)",
+        inner_radius: "Radio Isleta Central (m)",
         dx: "Largo X (m)",
         dy: "Ancho Y (m)",
         dz: "Alto Z (m)",
@@ -2091,7 +2316,7 @@ class CusteboStudioApp {
     document.querySelectorAll(".insp-arch-param").forEach((inputEl) => {
       inputEl.addEventListener("change", () => {
         const key = inputEl.getAttribute("data-param-key");
-        const isInt = key === "steps" || key === "shelves";
+        const isInt = key === "steps" || key === "shelves" || key === "stripes";
         const val = isInt
           ? Math.max(1, parseInt(inputEl.value || "2", 10))
           : Math.max(0.02, parseFloat(inputEl.value || "0.5"));
@@ -2103,6 +2328,20 @@ class CusteboStudioApp {
         });
       });
     });
+
+    const btnInspGroup = document.getElementById("btn-insp-group");
+    if (btnInspGroup) {
+      btnInspGroup.addEventListener("click", () => {
+        document.getElementById("btn-group-selected")?.click();
+      });
+    }
+
+    const btnInspStack = document.getElementById("btn-insp-stack");
+    if (btnInspStack) {
+      btnInspStack.addEventListener("click", () => {
+        document.getElementById("btn-stack-top")?.click();
+      });
+    }
 
     const btnExplode = document.getElementById("btn-explode-composite");
     if (btnExplode) {
@@ -2441,12 +2680,14 @@ class CusteboStudioApp {
     // Smart Drop to Ground / Surface Below (Space / End)
     const triggerDropToGround = () => {
       if (!this.selectedNodeId) return;
+      const selIds = Array.from(this.selectedNodeIds || []);
       this.sendCommand({
         type: "drop_to_ground",
         node_id: this.selectedNodeId,
+        node_ids: selIds.length > 1 ? selIds : [this.selectedNodeId],
         ground_z: 0.0,
       });
-      this._setStatus("Objeto apoyado sobre superficie inferior o suelo Z = 0 m");
+      this._setStatus("Objeto(s) apoyados sobre superficie inferior o suelo Z = 0 m");
     };
     document.getElementById("btn-drop-ground").addEventListener("click", triggerDropToGround);
 
@@ -2458,12 +2699,63 @@ class CusteboStudioApp {
         node_id: this.selectedNodeId,
         snap_rotation: true,
       });
-      this._setStatus("🧲 Objeto acoplado cara-a-cara con el vecino más cercano");
+      this._setStatus("🧲 Objeto acoplado cara-a-cara o encima del vecino más cercano");
     };
     const btnSnapNeighbor = document.getElementById("btn-snap-neighbor");
     if (btnSnapNeighbor) btnSnapNeighbor.addEventListener("click", triggerSnapNeighbor);
 
+    // Top-Surface Magnet / Stack On Top of Support Below (B)
+    const triggerStackOnTop = () => {
+      if (!this.selectedNodeId) return;
+      const selIds = Array.from(this.selectedNodeIds || []);
+      let supportId = null;
+      if (selIds.length >= 2) {
+        supportId = selIds.find((id) => id !== this.selectedNodeId) || null;
+      }
+      this.sendCommand({
+        type: "stack_on_neighbor",
+        node_id: this.selectedNodeId,
+        support_node_id: supportId,
+      });
+      this._setStatus(
+        supportId
+          ? "⬆️ Objeto apilado justo ENCIMA del objeto de soporte seleccionado"
+          : "⬆️ Objeto colocado ENCIMA de la superficie superior del objeto inferior/vecino"
+      );
+    };
+    document.getElementById("btn-stack-top")?.addEventListener("click", triggerStackOnTop);
+
+    // Group & Ungroup Multi-Selected Nodes (Ctrl+G / Ctrl+U)
+    const triggerGroupSelected = () => {
+      const selIds = Array.from(this.selectedNodeIds || []);
+      if (selIds.length < 2) {
+        this._setStatus(
+          "⚠ Selecciona 2 o más objetos (Shift+Clic o '🔲 Multi / Caja') para agruparlos en 1 bloque"
+        );
+        return;
+      }
+      this.sendCommand({
+        type: "group_nodes",
+        node_ids: selIds,
+      });
+      this._setStatus(`🔗 ${selIds.length} objetos agrupados en un único bloque compuesto`);
+    };
+
+    const triggerUngroupSelected = () => {
+      if (!this.selectedNodeId) return;
+      this.sendCommand({
+        type: "explode_composite",
+        node_id: this.selectedNodeId,
+      });
+      this._setStatus("💥 Grupo compuesto desglosado en piezas individuales");
+    };
+
+    document.getElementById("btn-group-selected")?.addEventListener("click", triggerGroupSelected);
+    document.getElementById("btn-outliner-group")?.addEventListener("click", triggerGroupSelected);
+    document.getElementById("btn-outliner-ungroup")?.addEventListener("click", triggerUngroupSelected);
+
     // Interactive Viewport Tools + Floating Popups:
+    // - "boxselect"   -> Marquee 2D multi-selection box
     // - "ruler"       -> #popup-ruler
     // - "floorplan"   -> #popup-wall-tracer
     // - "spline"      -> #popup-spline-tracer
@@ -2475,6 +2767,9 @@ class CusteboStudioApp {
       this.floorplanPoints = [];
       this.splinePoints = [];
 
+      document
+        .getElementById("btn-tool-boxselect")
+        ?.classList.toggle("active", this.activeViewportTool === "boxselect");
       document
         .getElementById("btn-tool-ruler")
         ?.classList.toggle("active", this.activeViewportTool === "ruler");
@@ -2507,7 +2802,11 @@ class CusteboStudioApp {
 
       this._updateToolOverlay3D(this.cursorWorldPt);
 
-      if (this.activeViewportTool === "ruler") {
+      if (this.activeViewportTool === "boxselect") {
+        this._setStatus(
+          "🔲 Multiselección por Caja activa: arrastra un rectángulo en el visor 3D o usa Shift+Clic para seleccionar varios objetos."
+        );
+      } else if (this.activeViewportTool === "ruler") {
         this._setStatus("📏 Medidor Láser 3D activo: haz clic en 2 puntos del suelo o sobre objetos para medir.");
       } else if (this.activeViewportTool === "floorplan") {
         this._setStatus("🧱 Trazador de Muros 3D activo: haz clic en las esquinas sobre el suelo y pulsa '🧱 Levantar Muros'.");
@@ -2522,6 +2821,9 @@ class CusteboStudioApp {
       }
     };
 
+    document
+      .getElementById("btn-tool-boxselect")
+      ?.addEventListener("click", () => setViewportTool("boxselect"));
     document
       .getElementById("btn-tool-ruler")
       ?.addEventListener("click", () => setViewportTool("ruler"));
@@ -2712,14 +3014,22 @@ class CusteboStudioApp {
       });
     });
 
-    // Duplicate & Delete Selected
+    // Duplicate & Delete Selected (Single or Multi-Selection)
     const duplicateSelected = () => {
-      if (!this.selectedNodeId) return;
-      this.sendCommand({ type: "duplicate_node", node_id: this.selectedNodeId });
+      const selIds = Array.from(this.selectedNodeIds || []);
+      if (selIds.length > 1) {
+        this.sendCommand({ type: "duplicate_nodes", node_ids: selIds });
+      } else if (this.selectedNodeId) {
+        this.sendCommand({ type: "duplicate_node", node_id: this.selectedNodeId });
+      }
     };
     const deleteSelected = () => {
-      if (!this.selectedNodeId) return;
-      this.sendCommand({ type: "delete_nodes", node_ids: [this.selectedNodeId] });
+      const selIds = Array.from(this.selectedNodeIds || []);
+      if (selIds.length > 0) {
+        this.sendCommand({ type: "delete_nodes", node_ids: selIds });
+      } else if (this.selectedNodeId) {
+        this.sendCommand({ type: "delete_nodes", node_ids: [this.selectedNodeId] });
+      }
     };
     document.getElementById("btn-dup-selected").addEventListener("click", duplicateSelected);
     document.getElementById("btn-del-selected").addEventListener("click", deleteSelected);
@@ -3121,11 +3431,17 @@ class CusteboStudioApp {
     // 6. Multi-Object Alignment & Equidistant Distribution (X / Y)
     const triggerCadAlignOrDistribute = (mode) => {
       if (!this.sceneGraph) return;
-      const movableIds = this.sceneGraph.nodes
-        .filter((n) => n.type !== "ground_plane" && n.type !== "light" && !n.locked && n.visible !== false)
-        .map((n) => n.id);
+      const selIds = Array.from(this.selectedNodeIds || []);
+      const movableIds =
+        selIds.length >= 2
+          ? selIds
+          : this.sceneGraph.nodes
+              .filter(
+                (n) => n.type !== "ground_plane" && n.type !== "light" && !n.locked && n.visible !== false
+              )
+              .map((n) => n.id);
       if (movableIds.length < 2) {
-        this._setStatus("⚠ Se necesitan al menos 2 objetos visibles y desbloqueados en la escena");
+        this._setStatus("⚠ Se necesitan al menos 2 objetos seleccionados o visibles en la escena");
         return;
       }
       this.sendCommand({
@@ -3395,6 +3711,16 @@ class CusteboStudioApp {
         duplicateSelected();
         return;
       }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "g") {
+        e.preventDefault();
+        triggerGroupSelected();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "u") {
+        e.preventDefault();
+        triggerUngroupSelected();
+        return;
+      }
 
       switch (e.key.toLowerCase()) {
         case "g":
@@ -3411,6 +3737,9 @@ class CusteboStudioApp {
           break;
         case "v":
           triggerSnapNeighbor();
+          break;
+        case "b":
+          triggerStackOnTop();
           break;
         case "m":
           setViewportTool("ruler");

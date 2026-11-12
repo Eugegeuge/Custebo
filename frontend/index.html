@@ -35,9 +35,12 @@
       <button id="btn-mode-rotate" class="tool-btn" title="Rotar (Atajo: R)">↻ Rotar (R)</button>
       <button id="btn-mode-scale" class="tool-btn" title="Escalar (Atajo: S)">⤢ Escalar (S)</button>
       <button id="btn-space-toggle" class="tool-btn" title="Alternar Coordenadas Globales (World) / Locales (Local) (Atajo: X)">🌐 World</button>
-      <button id="btn-drop-ground" class="tool-btn accent-subtle" title="Apoyar objeto sobre el suelo o mesa inferior (Atajo: Espacio)">⬇ Apoyar (Espacio)</button>
-      <button id="btn-snap-neighbor" class="tool-btn" title="Pegar esquina/cara contra el objeto vecino más cercano sin solapamiento">🧲 Imán Esquina</button>
-      <button id="btn-tool-ruler" class="tool-btn" title="Medidor y Regla Láser 3D: haz clic en 2 puntos del escenario">📏 Regla 3D</button>
+      <button id="btn-drop-ground" class="tool-btn accent-subtle" title="Apoyar objeto sobre el suelo o mesa inferior (Atajo: Espacio)">⬇ Apoyar</button>
+      <button id="btn-stack-top" class="tool-btn accent-subtle" title="Imán Superior: colocar el objeto justo ENCIMA de la mesa, palé u objeto más cercano/inferior (Atajo: B)">⬆️ Encima (B)</button>
+      <button id="btn-snap-neighbor" class="tool-btn" title="Imán de Acople: pegar esquina/cara contra el vecino más cercano o encima de él (Atajo: V)">🧲 Imán (V)</button>
+      <button id="btn-tool-boxselect" class="tool-btn" title="Multiselección por Caja / Clic Múltiple (o mantén Shift + Clic / Arrastrar)">🔲 Multi / Caja</button>
+      <button id="btn-group-selected" class="tool-btn" title="Agrupar los objetos seleccionados en un único objeto compuesto (Atajo: Ctrl+G)">🔗 Agrupar (Ctrl+G)</button>
+      <button id="btn-tool-ruler" class="tool-btn" title="Medidor y Regla Láser 3D: haz clic en 2 puntos del escenario (Atajo: M)">📏 Regla 3D</button>
       <button id="btn-tool-floorplan" class="tool-btn" title="Floorplan Tracer: haz clic en el suelo para dibujar polilíneas y levantar muros 3D (Enter para terminar)">✏ Trazar Muros</button>
     </div>
 
@@ -107,6 +110,16 @@
             <button class="create-btn" data-add-archetype="column_square" title="Columna estructural cuadrada">🏛 Columna</button>
             <button class="create-btn" data-add-archetype="stairs" title="Escalera paramétrica por peldaños">🪜 Escalera</button>
             <button class="create-btn" data-add-archetype="ramp" title="Rampa inclinada para robots">📐 Rampa Robot</button>
+          </div>
+
+          <div class="palette-cat-title">🛣 Viales, Carreteras y Cruces</div>
+          <div class="create-grid">
+            <button class="create-btn" data-add-archetype="road_straight" title="Tramo de carretera asfaltada con marcas viales y bordillos">🛣 Tramo Carretera</button>
+            <button class="create-btn" data-add-archetype="road_curved" title="Curva de carretera parametrizable (radio y ángulo)">↪ Curva Carretera</button>
+            <button class="create-btn" data-add-archetype="road_intersection" title="Cruce / Intersección de 4 vías con líneas de Stop">➕ Cruce 4 Vías</button>
+            <button class="create-btn" data-add-archetype="road_crosswalk" title="Paso de cebra peatonal sobre calzada">🦓 Paso de Cebra</button>
+            <button class="create-btn" data-add-archetype="roundabout" title="Rotonda / Glorieta circular con isleta central">🔄 Rotonda</button>
+            <button class="create-btn" data-add-archetype="speed_bump" title="Badén reductor de velocidad amarillo y negro">〰 Badén Vial</button>
           </div>
 
           <div class="palette-cat-title">🏭 Almacén, Mobiliario y Tráfico</div>
@@ -322,10 +335,12 @@
 
       <section class="panel-section outliner-section">
         <div class="panel-header">
-          <span>🌲 JERARQUÍA (OUTLINER)</span>
+          <span>🌲 JERARQUÍA (Shift+Clic = Multi)</span>
           <div class="outliner-actions">
-            <button id="btn-dup-selected" class="icon-btn" title="Duplicar seleccionado (Ctrl+D)">⧉</button>
-            <button id="btn-del-selected" class="icon-btn danger" title="Borrar seleccionado (Supr)">🗑</button>
+            <button id="btn-outliner-group" class="icon-btn" title="Agrupar seleccionados en un bloque (Ctrl+G)">🔗</button>
+            <button id="btn-outliner-ungroup" class="icon-btn" title="Desagrupar / Desglosar grupo seleccionado (Ctrl+U)">💥</button>
+            <button id="btn-dup-selected" class="icon-btn" title="Duplicar seleccionado(s) (Ctrl+D)">⧉</button>
+            <button id="btn-del-selected" class="icon-btn danger" title="Borrar seleccionado(s) (Supr)">🗑</button>
           </div>
         </div>
         <div id="outliner-tree" class="outliner-tree"></div>
@@ -343,6 +358,7 @@
     <!-- CENTER: 3D VIEWPORT (ENU Z-UP) -->
     <section class="viewport-container" id="viewport-container">
       <div id="canvas-mount" class="canvas-mount"></div>
+      <div id="selection-marquee-box" class="selection-marquee-box hidden"></div>
 
       <!-- Coordinate System Overlay Badge -->
       <div class="viewport-hud-top">

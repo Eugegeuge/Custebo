@@ -830,4 +830,19 @@ body {
   flex: 1;
 }
 
+/* ==================== 2D MARQUEE BOX SELECTION ==================== */
+.selection-marquee-box {
+  position: absolute;
+  border: 1.5px dashed #38bdf8;
+  background: rgba(56, 189, 248, 0.16);
+  pointer-events: none;
+  z-index: 25;
+  border-radius: 3px;
+}
+
+.selection-marquee-box.hidden {
+  display: none;
+}
+
+
 

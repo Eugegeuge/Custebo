@@ -14,7 +14,7 @@ from core.math_physics.transforms import (
     compute_local_half_extents,
     euler_rpy_to_rotation_matrix,
 )
-from core.procedural.spatial_tools import compute_smart_drop_z
+from core.procedural.spatial_tools import compute_smart_drop_z, get_node_world_aabb
 from core.schema.presets_library import rebuild_archetype_node
 from core.schema.scene_graph import (
     SceneGraphDocument,
@@ -341,7 +341,7 @@ class AddMultipleNodesCommand(Command):
 
 
 class BatchUpdatePosesCommand(Command):
-    """Update the poses of one or more nodes atomically (for Snap, Align, and Distribute tools)."""
+    """Update the poses of one or more nodes atomically (for Snap, Align, Distribute, and Multi-Gizmo tools)."""
 
     def __init__(self, new_poses_map: Dict[str, List[float]], label: str = "Align/Snap Objects") -> None:
         self.new_poses_map = copy.deepcopy(new_poses_map)
@@ -361,6 +361,189 @@ class BatchUpdatePosesCommand(Command):
             node = doc.get_node(nid)
             if node is not None:
                 node["pose"] = list(opose)
+
+
+class DuplicateNodesCommand(Command):
+    """Duplicate multiple selected nodes (`Ctrl+D`) in a single atomic Undo/Redo operation."""
+
+    def __init__(self, source_node_ids: List[str], offset_xy: tuple[float, float] = (0.35, 0.35)) -> None:
+        self.source_node_ids = list(dict.fromkeys(source_node_ids))
+        self.offset_xy = offset_xy
+        self.created_nodes: List[Dict[str, Any]] = []
+        super().__init__(label=f"Duplicate {len(self.source_node_ids)} object(s)")
+
+    def execute(self, doc: SceneGraphDocument) -> None:
+        if not self.created_nodes:
+            for sid in self.source_node_ids:
+                src = doc.get_node(sid)
+                if src is None or src.get("type") == "ground_plane":
+                    continue
+                dup = copy.deepcopy(src)
+                dup["id"] = generate_node_id(dup.get("type", "node"))
+                dup["name"] = doc.ensure_unique_name(f"{src.get('name', 'object')}_copy")
+                dup["locked"] = False
+                pose = list(dup.get("pose", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+                pose[0] = round(float(pose[0]) + self.offset_xy[0], 6)
+                pose[1] = round(float(pose[1]) + self.offset_xy[1], 6)
+                dup["pose"] = pose
+                self.created_nodes.append(normalize_node_in_place(dup))
+        for cn in self.created_nodes:
+            doc.nodes.append(copy.deepcopy(cn))
+
+    def undo(self, doc: SceneGraphDocument) -> None:
+        cids = {n["id"] for n in self.created_nodes}
+        doc.nodes = [n for n in doc.nodes if n.get("id") not in cids]
+
+
+class GroupNodesCommand(Command):
+    """
+    Merge 2 or more selected nodes into a single composite group node (`custom_group`)
+    whose origin sits at the combined world AABB center.
+    Full Undo restores the original independent nodes at their exact indices.
+    """
+
+    def __init__(self, node_ids: List[str], group_name: str = "grupo_objetos") -> None:
+        self.node_ids = list(dict.fromkeys(node_ids))
+        self.group_name = group_name
+        self.removed_entries: List[tuple[int, Dict[str, Any]]] = []
+        self.group_node: Optional[Dict[str, Any]] = None
+        super().__init__(label=f"Group {len(self.node_ids)} Objects")
+
+    def execute(self, doc: SceneGraphDocument) -> None:
+        if self.group_node is None:
+            id_set = set(self.node_ids)
+            members: List[Dict[str, Any]] = []
+            for idx, n in enumerate(doc.nodes):
+                if n.get("id") in id_set and n.get("type") not in ("ground_plane", "light"):
+                    self.removed_entries.append((idx, copy.deepcopy(n)))
+                    members.append(n)
+
+            if len(members) < 2:
+                self.removed_entries.clear()
+                return
+
+            # Compute combined world AABB across all member nodes
+            min_x, min_y, min_z = 1e9, 1e9, 1e9
+            max_x, max_y, max_z = -1e9, -1e9, -1e9
+            for m in members:
+                bmin, bmax = get_node_world_aabb(m)
+                min_x = min(min_x, bmin[0])
+                min_y = min(min_y, bmin[1])
+                min_z = min(min_z, bmin[2])
+                max_x = max(max_x, bmax[0])
+                max_y = max(max_y, bmax[1])
+                max_z = max(max_z, bmax[2])
+
+            cx = (min_x + max_x) * 0.5
+            cy = (min_y + max_y) * 0.5
+            cz = (min_z + max_z) * 0.5
+            bbox_size = [
+                max(max_x - min_x, 0.1),
+                max(max_y - min_y, 0.1),
+                max(max_z - min_z, 0.1),
+            ]
+
+            combined_parts: List[Dict[str, Any]] = []
+            for m_idx, m in enumerate(members):
+                mp = m.get("pose", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                mx, my, mz, mr, mpitch, myaw = (float(v) for v in mp[:6])
+                ms = m.get("scale", [1.0, 1.0, 1.0])
+                sx, sy, sz = (float(v) for v in ms[:3])
+                m_color = m.get("material", {}).get("color", [0.75, 0.78, 0.82, 1.0])
+                m_parts = m.get("parts")
+
+                if isinstance(m_parts, list) and len(m_parts) > 0:
+                    rot = euler_rpy_to_rotation_matrix(mr, mpitch, myaw)
+                    for p_idx, p in enumerate(m_parts):
+                        lp = p.get("local_pose", [0, 0, 0, 0, 0, 0])
+                        lx, ly, lz = float(lp[0]) * sx, float(lp[1]) * sy, float(lp[2]) * sz
+                        wx = mx + rot[0][0] * lx + rot[0][1] * ly + rot[0][2] * lz
+                        wy = my + rot[1][0] * lx + rot[1][1] * ly + rot[1][2] * lz
+                        wz = mz + rot[2][0] * lx + rot[2][1] * ly + rot[2][2] * lz
+                        psize = p.get("size", [1.0, 1.0, 1.0])
+                        combined_parts.append(
+                            {
+                                "name": f"{m.get('name', 'obj')}_{p.get('name', p_idx + 1)}",
+                                "shape": p.get("shape", "box"),
+                                "local_pose": [
+                                    clean_float(wx - cx, 6),
+                                    clean_float(wy - cy, 6),
+                                    clean_float(wz - cz, 6),
+                                    clean_float(mr + float(lp[3]), 6),
+                                    clean_float(mpitch + float(lp[4]), 6),
+                                    clean_float(myaw + float(lp[5]), 6),
+                                ],
+                                "size": [
+                                    clean_float(float(psize[0]) * sx, 6),
+                                    clean_float(float(psize[1]) * sy, 6),
+                                    clean_float(float(psize[2]) * sz, 6),
+                                ],
+                                "radius": clean_float(float(p.get("radius", 0.2)) * 0.5 * (sx + sy), 6),
+                                "length": clean_float(float(p.get("length", 1.0)) * sz, 6),
+                                "color": list(p.get("color", m_color)),
+                            }
+                        )
+                else:
+                    geom = m.get("geometry", {})
+                    gsize = geom.get("size", [1.0, 1.0, 1.0])
+                    combined_parts.append(
+                        {
+                            "name": f"{m.get('name', f'part_{m_idx + 1}')}",
+                            "shape": geom.get("shape", "box"),
+                            "local_pose": [
+                                clean_float(mx - cx, 6),
+                                clean_float(my - cy, 6),
+                                clean_float(mz - cz, 6),
+                                clean_float(mr, 6),
+                                clean_float(mpitch, 6),
+                                clean_float(myaw, 6),
+                            ],
+                            "size": [
+                                clean_float(float(gsize[0]) * sx, 6),
+                                clean_float(float(gsize[1]) * sy, 6),
+                                clean_float(float(gsize[2]) * sz, 6),
+                            ],
+                            "radius": clean_float(float(geom.get("radius", 0.5)) * 0.5 * (sx + sy), 6),
+                            "length": clean_float(float(geom.get("length", 1.0)) * sz, 6),
+                            "color": list(m_color),
+                        }
+                    )
+
+            first = members[0]
+            all_static = all(bool(m.get("static", True)) for m in members)
+            gnode = create_primitive_node(
+                name=doc.ensure_unique_name(self.group_name),
+                shape="box",
+                pose=[clean_float(cx, 6), clean_float(cy, 6), clean_float(cz, 6), 0.0, 0.0, 0.0],
+                size=[clean_float(bbox_size[0], 5), clean_float(bbox_size[1], 5), clean_float(bbox_size[2], 5)],
+                color=list(first.get("material", {}).get("color", [0.35, 0.65, 0.90, 1.0])),
+                static=all_static,
+                material_preset=first.get("inertial", {}).get("material_preset", "wood"),
+                folder_id=first.get("folder_id", "folder_props"),
+                node_id=generate_node_id("group"),
+            )
+            gnode["archetype"] = "custom_group"
+            gnode["archetype_params"] = {}
+            gnode["parts"] = combined_parts
+            self.group_node = normalize_node_in_place(gnode)
+            self.label = f"Group {len(members)} objects -> '{self.group_node['name']}'"
+
+        if self.group_node is None:
+            return
+
+        removed_ids = {entry[1]["id"] for entry in self.removed_entries}
+        doc.nodes = [n for n in doc.nodes if n.get("id") not in removed_ids]
+        doc.nodes.append(copy.deepcopy(self.group_node))
+
+    def undo(self, doc: SceneGraphDocument) -> None:
+        if self.group_node is None:
+            return
+        gid = self.group_node["id"]
+        doc.nodes = [n for n in doc.nodes if n.get("id") != gid]
+        for idx, saved_node in sorted(self.removed_entries, key=lambda x: x[0]):
+            insert_at = min(idx, len(doc.nodes))
+            doc.nodes.insert(insert_at, copy.deepcopy(saved_node))
+
 
 
 

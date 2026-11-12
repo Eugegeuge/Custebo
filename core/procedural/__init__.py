@@ -6,6 +6,7 @@ from core.procedural.spatial_tools import (
     get_node_world_aabb,
     compute_smart_drop_z,
     snap_node_to_nearest_neighbor,
+    stack_node_on_target_or_nearest,
     align_or_distribute_nodes,
     compute_3d_ruler_measurement,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "get_node_world_aabb",
     "compute_smart_drop_z",
     "snap_node_to_nearest_neighbor",
+    "stack_node_on_target_or_nearest",
     "align_or_distribute_nodes",
     "compute_3d_ruler_measurement",
     "extrude_polyline_to_walls",

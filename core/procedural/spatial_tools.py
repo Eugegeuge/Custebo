@@ -73,11 +73,13 @@ def compute_smart_drop_z(doc: SceneGraphDocument, target_node_id: str) -> float:
 def snap_node_to_nearest_neighbor(
     doc: SceneGraphDocument,
     node_id: str,
-    max_snap_distance: float = 2.0,
+    max_snap_distance: float = 3.0,
 ) -> List[float]:
     """
-    Snap `node_id` flush against the nearest neighboring wall/object face or corner in XY
-    so there are zero gaps or overlaps.
+    Snap `node_id` flush against the nearest neighboring object:
+      - If `node_id` is elevated above or near the top surface of a neighbor, it can snap directly
+        ONTO the neighbor's top face (Z = o_max_z + target_half_z).
+      - Otherwise, it snaps flush laterally against the neighbor's +X, -X, +Y, or -Y face/corner.
     """
     target = doc.get_node(node_id)
     if target is None:
@@ -87,36 +89,127 @@ def snap_node_to_nearest_neighbor(
     t_min, t_max = get_node_world_aabb(target)
     t_hx = (t_max[0] - t_min[0]) * 0.5
     t_hy = (t_max[1] - t_min[1]) * 0.5
+    t_bottom_offset = float(pose[2]) - t_min[2]
 
     best_dist = max_snap_distance
-    best_xy: Tuple[float, float] = (pose[0], pose[1])
+    best_xyz: Tuple[float, float, float] = (pose[0], pose[1], pose[2])
 
     for other in doc.nodes:
-        if other.get("id") == node_id or other.get("type") in ("light", "ground_plane"):
+        if other.get("id") == node_id or other.get("type") in ("light", "ground_plane") or not other.get("visible", True):
             continue
         o_min, o_max = get_node_world_aabb(other)
         o_cx = (o_min[0] + o_max[0]) * 0.5
         o_cy = (o_min[1] + o_max[1]) * 0.5
+        o_mid_z = (o_min[2] + o_max[2]) * 0.5
 
-        # Candidate flush positions around `other` (+X, -X, +Y, -Y faces and corner-aligned)
-        candidates = [
-            (o_max[0] + t_hx, o_cy),
-            (o_min[0] - t_hx, o_cy),
-            (o_cx, o_max[1] + t_hy),
-            (o_cx, o_min[1] - t_hy),
-            (o_max[0] + t_hx, o_max[1] - t_hy),
-            (o_max[0] + t_hx, o_min[1] + t_hy),
-            (o_min[0] - t_hx, o_max[1] - t_hy),
-            (o_min[0] - t_hx, o_min[1] + t_hy),
+        # 1. Lateral flush candidates around `other` (+X, -X, +Y, -Y faces and corner-aligned)
+        lateral_candidates = [
+            (o_max[0] + t_hx, o_cy, pose[2]),
+            (o_min[0] - t_hx, o_cy, pose[2]),
+            (o_cx, o_max[1] + t_hy, pose[2]),
+            (o_cx, o_min[1] - t_hy, pose[2]),
+            (o_max[0] + t_hx, o_max[1] - t_hy, pose[2]),
+            (o_max[0] + t_hx, o_min[1] + t_hy, pose[2]),
+            (o_min[0] - t_hx, o_max[1] - t_hy, pose[2]),
+            (o_min[0] - t_hx, o_min[1] + t_hy, pose[2]),
         ]
-        for cx, cy in candidates:
-            d = math.hypot(cx - pose[0], cy - pose[1])
+
+        # 2. Top-surface ("encima del objeto de abajo") snap candidates if target is above neighbor's mid-height
+        #    or already overlapping its XY footprint
+        overlap_xy = (t_min[0] < o_max[0] + 0.25 and t_max[0] > o_min[0] - 0.25) and (
+            t_min[1] < o_max[1] + 0.25 and t_max[1] > o_min[1] - 0.25
+        )
+        top_z = o_max[2] + t_bottom_offset
+        if t_min[2] >= o_mid_z - 0.15 or overlap_xy:
+            clamped_x = min(max(pose[0], o_min[0] + min(t_hx, (o_max[0] - o_min[0]) * 0.45)), o_max[0] - min(t_hx, (o_max[0] - o_min[0]) * 0.45))
+            clamped_y = min(max(pose[1], o_min[1] + min(t_hy, (o_max[1] - o_min[1]) * 0.45)), o_max[1] - min(t_hy, (o_max[1] - o_min[1]) * 0.45))
+            lateral_candidates.extend(
+                [
+                    (o_cx, o_cy, top_z),
+                    (clamped_x, clamped_y, top_z),
+                ]
+            )
+
+        for cx, cy, cz in lateral_candidates:
+            d = math.sqrt((cx - pose[0]) ** 2 + (cy - pose[1]) ** 2 + (cz - pose[2]) ** 2)
             if d < best_dist:
                 best_dist = d
-                best_xy = (cx, cy)
+                best_xyz = (cx, cy, cz)
 
-    pose[0] = clean_float(best_xy[0], 6)
-    pose[1] = clean_float(best_xy[1], 6)
+    pose[0] = clean_float(best_xyz[0], 6)
+    pose[1] = clean_float(best_xyz[1], 6)
+    pose[2] = clean_float(best_xyz[2], 6)
+    return pose
+
+
+def stack_node_on_target_or_nearest(
+    doc: SceneGraphDocument,
+    node_id: str,
+    support_node_id: str | None = None,
+    max_search_distance: float = 10.0,
+) -> List[float]:
+    """
+    Place `node_id` directly ON TOP of `support_node_id` (if given) or the nearest supporting
+    object below/nearby (`Z = support_max_z + target_bottom_offset`).
+    """
+    target = doc.get_node(node_id)
+    if target is None:
+        return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    pose = list(target.get("pose", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+    t_min, t_max = get_node_world_aabb(target)
+    t_hx = (t_max[0] - t_min[0]) * 0.5
+    t_hy = (t_max[1] - t_min[1]) * 0.5
+    t_bottom_offset = float(pose[2]) - t_min[2]
+
+    support_node = doc.get_node(support_node_id) if support_node_id else None
+
+    if support_node is None or support_node.get("id") == node_id:
+        # 1st priority: any visible object whose XY footprint already overlaps target
+        best_overlap_z = -1e9
+        for other in doc.nodes:
+            if other.get("id") == node_id or other.get("type") in ("light", "ground_plane") or not other.get("visible", True):
+                continue
+            o_min, o_max = get_node_world_aabb(other)
+            if (t_min[0] < o_max[0] and t_max[0] > o_min[0]) and (t_min[1] < o_max[1] and t_max[1] > o_min[1]):
+                if o_max[2] > best_overlap_z:
+                    best_overlap_z = o_max[2]
+                    support_node = other
+
+    if support_node is None:
+        # 2nd priority: nearest visible object in XY within `max_search_distance`
+        best_d = max_search_distance
+        for other in doc.nodes:
+            if other.get("id") == node_id or other.get("type") in ("light", "ground_plane") or not other.get("visible", True):
+                continue
+            op = other.get("pose", [0, 0, 0])
+            d_xy = math.hypot(float(op[0]) - pose[0], float(op[1]) - pose[1])
+            if d_xy < best_d:
+                best_d = d_xy
+                support_node = other
+
+    if support_node is None:
+        return pose
+
+    s_min, s_max = get_node_world_aabb(support_node)
+    s_cx = (s_min[0] + s_max[0]) * 0.5
+    s_cy = (s_min[1] + s_max[1]) * 0.5
+    s_w = s_max[0] - s_min[0]
+    s_d = s_max[1] - s_min[1]
+
+    # If target's center is already well inside the support's XY bounds, keep its XY; otherwise center it on top
+    margin_x = min(t_hx, s_w * 0.4)
+    margin_y = min(t_hy, s_d * 0.4)
+    inside_x = (s_min[0] + margin_x * 0.5) <= pose[0] <= (s_max[0] - margin_x * 0.5)
+    inside_y = (s_min[1] + margin_y * 0.5) <= pose[1] <= (s_max[1] - margin_y * 0.5)
+
+    new_x = pose[0] if inside_x else s_cx
+    new_y = pose[1] if inside_y else s_cy
+    new_z = s_max[2] + t_bottom_offset
+
+    pose[0] = clean_float(new_x, 6)
+    pose[1] = clean_float(new_y, 6)
+    pose[2] = clean_float(new_z, 6)
     return pose
 
 

@@ -40,7 +40,9 @@ from core.commands import (
     DeleteNodesCommand,
     DropToGroundCommand,
     DuplicateNodeCommand,
+    DuplicateNodesCommand,
     ExplodeCompositeCommand,
+    GroupNodesCommand,
     UpdateNodeCommand,
     UpdateWorldSettingsCommand,
 )
@@ -66,6 +68,7 @@ from core.procedural import (
     generate_spline_clones,
     reconstruct_3d_walls_from_pgm,
     snap_node_to_nearest_neighbor,
+    stack_node_on_target_or_nearest,
 )
 from core.ros2.nav2_map_generator import generate_nav2_occupancy_map
 from core.ros2.navigation_tools import (
@@ -544,24 +547,62 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
             if node_ids:
                 SESSION.manager.execute(DeleteNodesCommand(node_ids))
 
-        elif cmd_type == "duplicate_node":
-            node_id = str(body["node_id"])
-            dup_cmd = DuplicateNodeCommand(node_id)
-            SESSION.manager.execute(dup_cmd)
-            if dup_cmd.created_node:
-                created_node_id = dup_cmd.created_node["id"]
+        elif cmd_type in ("duplicate_node", "duplicate_nodes"):
+            node_ids = list(body.get("node_ids", []))
+            if not node_ids and body.get("node_id"):
+                node_ids = [str(body["node_id"])]
+            if len(node_ids) == 1:
+                dup_cmd = DuplicateNodeCommand(node_ids[0])
+                SESSION.manager.execute(dup_cmd)
+                if dup_cmd.created_node:
+                    created_node_id = dup_cmd.created_node["id"]
+            elif len(node_ids) > 1:
+                mdup_cmd = DuplicateNodesCommand(node_ids)
+                SESSION.manager.execute(mdup_cmd)
+                if mdup_cmd.created_nodes:
+                    created_node_id = mdup_cmd.created_nodes[-1]["id"]
+
+        elif cmd_type == "group_nodes":
+            node_ids = list(body.get("node_ids", []))
+            group_name = str(body.get("name", "grupo_objetos")).strip() or "grupo_objetos"
+            if len(node_ids) >= 2:
+                grp_cmd = GroupNodesCommand(node_ids, group_name=group_name)
+                SESSION.manager.execute(grp_cmd)
+                if grp_cmd.group_node:
+                    created_node_id = grp_cmd.group_node["id"]
+
+        elif cmd_type == "batch_update_poses":
+            poses_map = dict(body.get("poses_map", {}))
+            label = str(body.get("label", f"Transform {len(poses_map)} object(s)"))
+            if poses_map:
+                SESSION.manager.execute(BatchUpdatePosesCommand(poses_map, label=label))
 
         elif cmd_type == "drop_to_ground":
-            node_id = str(body["node_id"])
+            node_ids = list(body.get("node_ids", []))
+            if not node_ids and body.get("node_id"):
+                node_ids = [str(body["node_id"])]
             raw_gz = body.get("ground_z")
             ground_z = float(raw_gz) if isinstance(raw_gz, (int, float)) else None
-            SESSION.manager.execute(DropToGroundCommand(node_id, ground_z=ground_z))
+            for nid in node_ids:
+                SESSION.manager.execute(DropToGroundCommand(nid, ground_z=ground_z))
 
         elif cmd_type == "snap_to_neighbor":
             node_id = str(body["node_id"])
             new_pose = snap_node_to_nearest_neighbor(SESSION.manager.doc, node_id)
             SESSION.manager.execute(
                 BatchUpdatePosesCommand({node_id: new_pose}, label=f"Snap '{node_id}' to Neighbor")
+            )
+
+        elif cmd_type == "stack_on_neighbor":
+            node_id = str(body["node_id"])
+            support_id = body.get("support_node_id")
+            new_pose = stack_node_on_target_or_nearest(
+                SESSION.manager.doc,
+                node_id=node_id,
+                support_node_id=str(support_id) if support_id else None,
+            )
+            SESSION.manager.execute(
+                BatchUpdatePosesCommand({node_id: new_pose}, label=f"Stack '{node_id}' on Top")
             )
 
         elif cmd_type == "align_distribute":
@@ -846,20 +887,35 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
         wall_height = float(body.get("wall_height", 2.50))
 
         if body.get("use_demo_slam"):
-            # Synthesize a 200x160 (10m x 8m at 0.05m/px) SLAM floorplan PGM with outer walls & rooms
+            # Synthesize a 200x160 (10m x 8m at 0.05m/px) SLAM floorplan PGM with:
+            # - Straight outer walls & interior divider
+            # - A smooth curved semicircular bay wall on the right
+            # - A circular structural pillar in the main hall
+            import math as _m
+
             w_px, h_px = 200, 160
             pixels = bytearray([254] * (w_px * h_px))
-            for x in range(20, 180):
-                pixels[20 * w_px + x] = 0  # Top wall
-                if not (90 <= x <= 115):
-                    pixels[140 * w_px + x] = 0  # Bottom wall with doorway
+            for x in range(20, 145):
+                pixels[20 * w_px + x] = 0  # Top straight wall
+                if not (80 <= x <= 108):
+                    pixels[140 * w_px + x] = 0  # Bottom straight wall with doorway
             for y in range(20, 141):
-                pixels[y * w_px + 20] = 0  # Left wall
-                pixels[y * w_px + 179] = 0  # Right wall
-            for y in range(20, 95):
-                pixels[y * w_px + 100] = 0  # Interior divider wall
-            for x in range(20, 75):
-                pixels[85 * w_px + x] = 0  # Interior room wall
+                pixels[y * w_px + 20] = 0  # Left straight wall
+            # Smooth semicircular curved wall on the right side (center=(145, 80), R=60 px)
+            for deg in range(-90, 91):
+                rad = _m.radians(deg)
+                cx_p = int(round(145 + 34 * _m.cos(rad)))
+                cy_p = int(round(80 + 60 * _m.sin(rad)))
+                if 0 <= cx_p < w_px and 0 <= cy_p < h_px:
+                    pixels[cy_p * w_px + cx_p] = 0
+            # Interior divider wall
+            for y in range(20, 88):
+                pixels[y * w_px + 95] = 0
+            # Solid circular pillar at (60, 105) with radius 6 px (0.30 m)
+            for py in range(98, 113):
+                for px in range(53, 68):
+                    if _m.hypot(px - 60, py - 105) <= 5.5:
+                        pixels[py * w_px + px] = 0
             raw_bytes = f"P5\n{w_px} {h_px}\n255\n".encode("ascii") + bytes(pixels)
         else:
             b64_data = str(body.get("content_base64", body.get("pgm_base64", "")))

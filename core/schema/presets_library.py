@@ -231,6 +231,90 @@ ARCHETYPE_CATALOG: Dict[str, Dict[str, Any]] = {
             "dz": 0.32,
         },
     },
+    # --- ROADS, STREETS & TRAFFIC INFRASTRUCTURE ---
+    "road_straight": {
+        "label": "🛣 Tramo Carretera",
+        "category": "roads",
+        "folder_id": "folder_arch",
+        "static": True,
+        "material_preset": "concrete",
+        "default_color": [0.18, 0.20, 0.23, 1.0],
+        "default_params": {
+            "length": 8.0,
+            "width": 4.5,
+            "thickness": 0.06,
+            "curb_width": 0.25,
+        },
+    },
+    "road_curved": {
+        "label": "↪ Curva Carretera",
+        "category": "roads",
+        "folder_id": "folder_arch",
+        "static": True,
+        "material_preset": "concrete",
+        "default_color": [0.18, 0.20, 0.23, 1.0],
+        "default_params": {
+            "radius": 6.0,
+            "width": 4.5,
+            "angle_deg": 90.0,
+            "thickness": 0.06,
+            "segments": 10,
+        },
+    },
+    "road_intersection": {
+        "label": "➕ Cruce 4 Vías",
+        "category": "roads",
+        "folder_id": "folder_arch",
+        "static": True,
+        "material_preset": "concrete",
+        "default_color": [0.18, 0.20, 0.23, 1.0],
+        "default_params": {
+            "arm_length": 10.0,
+            "width": 4.5,
+            "thickness": 0.06,
+        },
+    },
+    "road_crosswalk": {
+        "label": "🦓 Paso de Cebra",
+        "category": "roads",
+        "folder_id": "folder_arch",
+        "static": True,
+        "material_preset": "concrete",
+        "default_color": [0.18, 0.20, 0.23, 1.0],
+        "default_params": {
+            "length": 4.0,
+            "width": 4.5,
+            "thickness": 0.06,
+            "stripes": 6,
+        },
+    },
+    "roundabout": {
+        "label": "🔄 Rotonda / Glorieta",
+        "category": "roads",
+        "folder_id": "folder_arch",
+        "static": True,
+        "material_preset": "concrete",
+        "default_color": [0.18, 0.20, 0.23, 1.0],
+        "default_params": {
+            "outer_radius": 6.5,
+            "inner_radius": 2.2,
+            "thickness": 0.06,
+        },
+    },
+    "speed_bump": {
+        "label": "〰 Badén Reductor",
+        "category": "roads",
+        "folder_id": "folder_props",
+        "static": True,
+        "material_preset": "plastic",
+        "default_color": [0.95, 0.76, 0.08, 1.0],
+        "default_params": {
+            "width": 4.0,
+            "depth": 0.48,
+            "height": 0.07,
+            "stripes": 8,
+        },
+    },
 }
 
 # Fix accidental leading space in key if any
@@ -678,6 +762,237 @@ def rebuild_archetype_node(node: Dict[str, Any]) -> Dict[str, Any]:
         dz = max(float(params.get("dz", 0.32)), 0.05)
         bbox = [dx, dy, dz]
         parts = [_make_part("box_body", "box", [0, 0, 0, 0, 0, 0], size=[dx, dy, dz], color=base_color)]
+
+    elif arch == "road_straight":
+        L = max(float(params.get("length", 8.0)), 1.0)
+        W = max(float(params.get("width", 4.5)), 1.2)
+        T = max(float(params.get("thickness", 0.06)), 0.02)
+        cw = max(float(params.get("curb_width", 0.25)), 0.0)
+        curb_h = T + 0.08
+        total_w = W + 2.0 * cw
+        bbox = [L, total_w, curb_h]
+        z_road = -curb_h * 0.5 + T * 0.5
+        z_line = z_road + T * 0.5 + 0.004
+        white = [0.95, 0.96, 0.98, 1.0]
+        yellow = [0.98, 0.80, 0.12, 1.0]
+        curb_col = [0.62, 0.65, 0.69, 1.0]
+
+        parts = [
+            _make_part("asphalt_base", "box", [0.0, 0.0, z_road, 0, 0, 0], size=[L, W, T], color=base_color),
+            _make_part("edge_line_left", "box", [0.0, W * 0.46, z_line, 0, 0, 0], size=[L, 0.10, 0.008], color=white),
+            _make_part("edge_line_right", "box", [0.0, -W * 0.46, z_line, 0, 0, 0], size=[L, 0.10, 0.008], color=white),
+        ]
+        if cw > 0.02:
+            parts.append(
+                _make_part("curb_left", "box", [0.0, (W + cw) * 0.5, 0.0, 0, 0, 0], size=[L, cw, curb_h], color=curb_col)
+            )
+            parts.append(
+                _make_part("curb_right", "box", [0.0, -(W + cw) * 0.5, 0.0, 0, 0, 0], size=[L, cw, curb_h], color=curb_col)
+            )
+        n_dashes = max(int(L / 1.6), 2)
+        step_x = L / float(n_dashes)
+        dash_len = step_x * 0.52
+        for i in range(n_dashes):
+            dx_pos = -L * 0.5 + (i + 0.5) * step_x
+            parts.append(
+                _make_part(f"center_dash_{i + 1}", "box", [dx_pos, 0.0, z_line, 0, 0, 0], size=[dash_len, 0.11, 0.008], color=yellow)
+            )
+
+    elif arch == "road_curved":
+        R = max(float(params.get("radius", 6.0)), 2.0)
+        W = max(float(params.get("width", 4.5)), 1.2)
+        ang_deg = max(min(float(params.get("angle_deg", 90.0)), 180.0), 15.0)
+        T = max(float(params.get("thickness", 0.06)), 0.02)
+        n_seg = max(min(int(params.get("segments", 10)), 24), 4)
+        ang_rad = math.radians(ang_deg)
+        d_theta = ang_rad / float(n_seg)
+        seg_len = 2.0 * R * math.sin(d_theta * 0.5) + 0.18
+        yellow = [0.98, 0.80, 0.12, 1.0]
+        white = [0.95, 0.96, 0.98, 1.0]
+
+        # Center curve around its chord midpoint so the gizmo sits right on the road curve
+        mid_ang = ang_rad * 0.5
+        cx_off = R * math.cos(mid_ang)
+        cy_off = R * math.sin(mid_ang)
+        bbox = [R + W, R + W, T + 0.02]
+
+        for i in range(n_seg):
+            theta = (i + 0.5) * d_theta
+            px = R * math.cos(theta) - cx_off
+            py = R * math.sin(theta) - cy_off
+            tangent_yaw = theta + math.pi * 0.5
+            parts.append(
+                _make_part(
+                    f"curve_asphalt_{i + 1}",
+                    "box",
+                    [px, py, 0.0, 0.0, 0.0, tangent_yaw],
+                    size=[seg_len, W, T],
+                    color=base_color,
+                )
+            )
+            if i % 2 == 0:
+                parts.append(
+                    _make_part(
+                        f"curve_dash_{i + 1}",
+                        "box",
+                        [px, py, T * 0.5 + 0.005, 0.0, 0.0, tangent_yaw],
+                        size=[seg_len * 0.55, 0.11, 0.008],
+                        color=yellow,
+                    )
+                )
+            # Outer & inner white edge lines
+            r_in = max(R - W * 0.46, 0.3)
+            r_out = R + W * 0.46
+            len_in = 2.0 * r_in * math.sin(d_theta * 0.5) + 0.05
+            len_out = 2.0 * r_out * math.sin(d_theta * 0.5) + 0.05
+            parts.append(
+                _make_part(
+                    f"edge_in_{i + 1}",
+                    "box",
+                    [r_in * math.cos(theta) - cx_off, r_in * math.sin(theta) - cy_off, T * 0.5 + 0.005, 0.0, 0.0, tangent_yaw],
+                    size=[len_in, 0.09, 0.008],
+                    color=white,
+                )
+            )
+            parts.append(
+                _make_part(
+                    f"edge_out_{i + 1}",
+                    "box",
+                    [r_out * math.cos(theta) - cx_off, r_out * math.sin(theta) - cy_off, T * 0.5 + 0.005, 0.0, 0.0, tangent_yaw],
+                    size=[len_out, 0.09, 0.008],
+                    color=white,
+                )
+            )
+
+    elif arch == "road_intersection":
+        L = max(float(params.get("arm_length", 10.0)), 4.0)
+        W = max(float(params.get("width", 4.5)), 1.5)
+        T = max(float(params.get("thickness", 0.06)), 0.02)
+        bbox = [L, L, T + 0.02]
+        white = [0.95, 0.96, 0.98, 1.0]
+        yellow = [0.98, 0.80, 0.12, 1.0]
+        z_line = T * 0.5 + 0.005
+        arm_span = max((L - W) * 0.5, 0.6)
+        arm_offset = W * 0.5 + arm_span * 0.5
+
+        parts = [
+            _make_part("road_arm_x", "box", [0, 0, 0, 0, 0, 0], size=[L, W, T], color=base_color),
+            _make_part("road_arm_y", "box", [0, 0, 0.001, 0, 0, 0], size=[W, L, T], color=base_color),
+            # 4 Stop lines
+            _make_part("stop_x_pos", "box", [W * 0.54, -W * 0.23, z_line, 0, 0, 0], size=[0.22, W * 0.44, 0.008], color=white),
+            _make_part("stop_x_neg", "box", [-W * 0.54, W * 0.23, z_line, 0, 0, 0], size=[0.22, W * 0.44, 0.008], color=white),
+            _make_part("stop_y_pos", "box", [W * 0.23, W * 0.54, z_line, 0, 0, 0], size=[W * 0.44, 0.22, 0.008], color=white),
+            _make_part("stop_y_neg", "box", [-W * 0.23, -W * 0.54, z_line, 0, 0, 0], size=[W * 0.44, 0.22, 0.008], color=white),
+            # 4 Center divider lines on the arms
+            _make_part("div_x_pos", "box", [arm_offset, 0, z_line, 0, 0, 0], size=[arm_span * 0.8, 0.10, 0.008], color=yellow),
+            _make_part("div_x_neg", "box", [-arm_offset, 0, z_line, 0, 0, 0], size=[arm_span * 0.8, 0.10, 0.008], color=yellow),
+            _make_part("div_y_pos", "box", [0, arm_offset, z_line, 0, 0, 0], size=[0.10, arm_span * 0.8, 0.008], color=yellow),
+            _make_part("div_y_neg", "box", [0, -arm_offset, z_line, 0, 0, 0], size=[0.10, arm_span * 0.8, 0.008], color=yellow),
+        ]
+
+    elif arch == "road_crosswalk":
+        L = max(float(params.get("length", 4.0)), 1.5)
+        W = max(float(params.get("width", 4.5)), 1.5)
+        T = max(float(params.get("thickness", 0.06)), 0.02)
+        n_stripes = max(min(int(params.get("stripes", 6)), 16), 2)
+        bbox = [L, W, T + 0.02]
+        white = [0.96, 0.97, 0.99, 1.0]
+        z_line = T * 0.5 + 0.005
+
+        parts = [
+            _make_part("crosswalk_asphalt", "box", [0, 0, 0, 0, 0, 0], size=[L, W, T], color=base_color),
+        ]
+        usable_w = W * 0.84
+        step_y = usable_w / float(n_stripes)
+        stripe_w = step_y * 0.55
+        stripe_l = min(L * 0.68, 2.6)
+        for i in range(n_stripes):
+            sy = -usable_w * 0.5 + (i + 0.5) * step_y
+            parts.append(
+                _make_part(
+                    f"zebra_stripe_{i + 1}",
+                    "box",
+                    [0.0, sy, z_line, 0.0, 0.0, 0.0],
+                    size=[stripe_l, stripe_w, 0.009],
+                    color=white,
+                )
+            )
+
+    elif arch == "roundabout":
+        r_out = max(float(params.get("outer_radius", 6.5)), 2.5)
+        r_in = min(max(float(params.get("inner_radius", 2.2)), 0.6), r_out - 1.2)
+        T = max(float(params.get("thickness", 0.06)), 0.02)
+        island_h = T + 0.14
+        bbox = [r_out * 2.0, r_out * 2.0, island_h]
+        z_road = -island_h * 0.5 + T * 0.5
+
+        parts = [
+            _make_part(
+                "roundabout_asphalt",
+                "cylinder",
+                [0.0, 0.0, z_road, 0.0, 0.0, 0.0],
+                radius=r_out,
+                length=T,
+                color=base_color,
+            ),
+            _make_part(
+                "island_curb",
+                "cylinder",
+                [0.0, 0.0, -island_h * 0.5 + (T + 0.08) * 0.5, 0.0, 0.0, 0.0],
+                radius=r_in + 0.22,
+                length=T + 0.08,
+                color=[0.85, 0.87, 0.90, 1.0],
+            ),
+            _make_part(
+                "island_grass",
+                "cylinder",
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                radius=r_in,
+                length=island_h,
+                color=[0.20, 0.58, 0.26, 1.0],
+            ),
+        ]
+        r_mid = (r_out + r_in + 0.22) * 0.5
+        n_dashes = 16
+        for i in range(n_dashes):
+            ang = (2.0 * math.pi * i) / float(n_dashes)
+            parts.append(
+                _make_part(
+                    f"lane_dash_{i + 1}",
+                    "box",
+                    [
+                        r_mid * math.cos(ang),
+                        r_mid * math.sin(ang),
+                        z_road + T * 0.5 + 0.005,
+                        0.0,
+                        0.0,
+                        ang + math.pi * 0.5,
+                    ],
+                    size=[0.75, 0.11, 0.008],
+                    color=[0.96, 0.97, 0.99, 1.0],
+                )
+            )
+
+    elif arch == "speed_bump":
+        W = max(float(params.get("width", 4.0)), 0.8)
+        D = max(float(params.get("depth", 0.48)), 0.2)
+        H = max(float(params.get("height", 0.07)), 0.02)
+        n_st = max(min(int(params.get("stripes", 8)), 20), 2)
+        bbox = [D, W, H]
+        seg_w = W / float(n_st)
+        yellow = [0.96, 0.78, 0.06, 1.0]
+        black = [0.14, 0.15, 0.17, 1.0]
+        for i in range(n_st):
+            sy = -W * 0.5 + (i + 0.5) * seg_w
+            parts.append(
+                _make_part(
+                    f"bump_seg_{i + 1}",
+                    "box",
+                    [0.0, sy, 0.0, 0.0, 0.0, 0.0],
+                    size=[D, seg_w * 0.98, H],
+                    color=yellow if i % 2 == 0 else black,
+                )
+            )
 
     node["parts"] = parts
     node.setdefault("geometry", {})
