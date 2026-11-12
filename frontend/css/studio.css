@@ -350,6 +350,10 @@ body {
   margin-bottom: 6px;
 }
 
+.create-grid.hidden {
+  display: none;
+}
+
 .create-btn {
   background: var(--bg-card);
   border: 1px solid var(--border-color);

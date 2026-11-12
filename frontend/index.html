@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Custebo — ROS 2 &amp; Gazebo 3D World Editor</title>
-  <link rel="stylesheet" href="/css/studio.css?v=20261112b" />
+  <link rel="stylesheet" href="/css/studio.css?v=20261112c" />
   <script type="importmap">
     {
       "imports": {
@@ -101,8 +101,11 @@
           <span>➕ LIBRERÍA DE ELEMENTOS (Z-UP)</span>
         </div>
         <div class="palette-scroll">
-          <div class="palette-cat-title">🏗 Arquitectura y Estructura (Estáticos)</div>
-          <div class="create-grid">
+          <div class="palette-cat-title custom-cat-header">
+            <span>🏗 Arquitectura y Estructura (Estáticos)</span>
+            <button id="btn-toggle-cat-arch" class="mini-btn">Cerrar</button>
+          </div>
+          <div id="cat-grid-arch" class="create-grid">
             <button class="create-btn" data-add-archetype="wall" title="Pared / Muro estirado estático">🧱 Pared / Muro</button>
             <button class="create-btn" data-add-archetype="wall_doorway" title="Muro con hueco real de puerta">🚪 Muro c/ Puerta</button>
             <button class="create-btn" data-add-archetype="wall_window" title="Muro con hueco de ventana">🪟 Muro c/ Ventana</button>
@@ -112,8 +115,11 @@
             <button class="create-btn" data-add-archetype="ramp" title="Rampa inclinada para robots">📐 Rampa Robot</button>
           </div>
 
-          <div class="palette-cat-title">🛣 Viales, Carreteras y Cruces</div>
-          <div class="create-grid">
+          <div class="palette-cat-title custom-cat-header">
+            <span>🛣 Viales, Carreteras y Cruces</span>
+            <button id="btn-toggle-cat-roads" class="mini-btn">Cerrar</button>
+          </div>
+          <div id="cat-grid-roads" class="create-grid">
             <button class="create-btn" data-add-archetype="road_straight" title="Tramo de carretera asfaltada con marcas viales y bordillos">🛣 Tramo Carretera</button>
             <button class="create-btn" data-add-archetype="road_curved" title="Curva de carretera parametrizable (radio y ángulo)">↪ Curva Carretera</button>
             <button class="create-btn" data-add-archetype="road_intersection" title="Cruce / Intersección de 4 vías con líneas de Stop">➕ Cruce 4 Vías</button>
@@ -122,8 +128,11 @@
             <button class="create-btn" data-add-archetype="speed_bump" title="Badén reductor de velocidad amarillo y negro">〰 Badén Vial</button>
           </div>
 
-          <div class="palette-cat-title">🏭 Almacén, Mobiliario y Tráfico</div>
-          <div class="create-grid">
+          <div class="palette-cat-title custom-cat-header">
+            <span>🏭 Almacén, Mobiliario y Tráfico</span>
+            <button id="btn-toggle-cat-warehouse" class="mini-btn">Cerrar</button>
+          </div>
+          <div id="cat-grid-warehouse" class="create-grid">
             <button class="create-btn" data-add-archetype="warehouse_rack" title="Estantería industrial multi-balda">🗄 Estantería</button>
             <button class="create-btn" data-add-archetype="table" title="Mesa con tablero y 4 patas">🪑 Mesa / Lab</button>
             <button class="create-btn" data-add-archetype="euro_pallet" title="Palé europeo estándar 1.2x0.8m">🪵 Palé EUR</button>
@@ -134,8 +143,11 @@
             <button class="create-btn" data-add-archetype="cardboard_box" title="Caja de cartón ligera dinámica">📦 Caja Cartón</button>
           </div>
 
-          <div class="palette-cat-title">🔷 Primitivas Puras y Luces</div>
-          <div class="create-grid">
+          <div class="palette-cat-title custom-cat-header">
+            <span>🔷 Primitivas Puras y Luces</span>
+            <button id="btn-toggle-cat-prim" class="mini-btn">Cerrar</button>
+          </div>
+          <div id="cat-grid-prim" class="create-grid">
             <button class="create-btn" data-add-shape="box">📦 Cubo (Box)</button>
             <button class="create-btn" data-add-shape="cylinder">🛢 Cilindro</button>
             <button class="create-btn" data-add-shape="sphere">🟠 Esfera</button>
@@ -148,7 +160,7 @@
           <!-- SECCIÓN DE OBJETOS PERSONALIZADOS DEL USUARIO -->
           <div class="palette-cat-title custom-cat-header">
             <span>📂 Objetos Personalizados</span>
-            <button id="btn-open-mesh-import" class="mini-btn" title="Subir archivo 3D (.stl, .obj, .dae, .glb) a Objetos Personalizados">➕ Importar 3D</button>
+            <button id="btn-open-mesh-import" class="mini-btn" title="Abrir/Cerrar importador de archivos 3D (.stl, .obj, .dae, .glb)">Abrir</button>
           </div>
 
           <!-- Asistente rápido de importación de Mallas CAD -->
@@ -177,7 +189,7 @@
           <!-- HERRAMIENTAS CAD Y GENERACIÓN PROCEDURAL (FASE 3) -->
           <div class="palette-cat-title custom-cat-header">
             <span>⚡ Generación Procedural y CAD</span>
-            <button id="btn-toggle-procedural" class="mini-btn">Abrir/Cerrar</button>
+            <button id="btn-toggle-procedural" class="mini-btn">Cerrar</button>
           </div>
           <div id="procedural-drawer" class="import-drawer">
             <!-- 1. Grid Array Cloner -->
@@ -270,7 +282,7 @@
           <!-- INTEGRACIÓN PROFUNDA ROS 2, NAV2 Y SENSORES (FASE 4) -->
           <div class="palette-cat-title custom-cat-header">
             <span>🤖 ROS 2, Nav2 y Sensores</span>
-            <button id="btn-toggle-ros2" class="mini-btn">Abrir</button>
+            <button id="btn-toggle-ros2" class="mini-btn">Cerrar</button>
           </div>
           <div id="ros2-drawer" class="import-drawer">
             <!-- 4.1 Instant 2D Map Generator (map.pgm + map.yaml) -->
@@ -321,7 +333,7 @@
           <!-- CONECTOR GAZEBO FUEL & WORKSPACE ROS 2 -->
           <div class="palette-cat-title custom-cat-header">
             <span>🌐 Gazebo Fuel y Workspace ROS 2</span>
-            <button id="btn-toggle-fuel" class="mini-btn">Buscar</button>
+            <button id="btn-toggle-fuel" class="mini-btn">Abrir</button>
           </div>
           <div id="fuel-browser-drawer" class="import-drawer hidden">
             <div class="insp-row">
@@ -501,6 +513,6 @@
     </aside>
   </main>
 
-  <script type="module" src="/js/main.js?v=20261112b"></script>
+  <script type="module" src="/js/main.js?v=20261112c"></script>
 </body>
 </html>

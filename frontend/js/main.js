@@ -507,29 +507,6 @@ class CusteboStudioApp {
       this.nodesRootGroup.add(new THREE.Line(routeGeom, routeMat));
     }
 
-    // Draw unmistakable 3D Selection Bounding Boxes for all selected objects (and a combined group box)
-    const combinedBox = new THREE.Box3();
-    let combinedCount = 0;
-    for (const selId of this.selectedNodeIds) {
-      const grp = this.nodeObjectMap.get(selId);
-      if (!grp || !grp.visible) continue;
-      grp.updateMatrixWorld(true);
-      const b3 = new THREE.Box3().setFromObject(grp);
-      if (!b3.isEmpty()) {
-        b3.expandByScalar(0.02);
-        const isPrimary = selId === this.selectedNodeId;
-        const helperColor =
-          this.selectedNodeIds.size > 1 ? (isPrimary ? 0x38bdf8 : 0xc084fc) : 0x38bdf8;
-        this.nodesRootGroup.add(new THREE.Box3Helper(b3, helperColor));
-        combinedBox.union(b3);
-        combinedCount++;
-      }
-    }
-    if (combinedCount >= 2 && !combinedBox.isEmpty()) {
-      const unionBox = combinedBox.clone().expandByScalar(0.06);
-      this.nodesRootGroup.add(new THREE.Box3Helper(unionBox, 0xfacc15));
-    }
-
     if (this.selectedNodeId) {
       const selectedGroup = this.nodeObjectMap.get(this.selectedNodeId);
       const nodeData = this._getSelectedNode();
@@ -570,6 +547,11 @@ class CusteboStudioApp {
 
     if (node.type === "primitive" || node.type === "include" || node.type === "mesh") {
       const isSelected = node.id === this.selectedNodeId || this.selectedNodeIds.has(node.id);
+      const isMultiSecondary =
+        this.selectedNodeIds.size > 1 &&
+        this.selectedNodeIds.has(node.id) &&
+        node.id !== this.selectedNodeId;
+      const edgeColor = isMultiSecondary ? 0xc084fc : 0x60a5fa;
       const parts = Array.isArray(node.parts) && node.parts.length > 0 ? node.parts : null;
 
       if (node.type === "mesh") {
@@ -604,7 +586,7 @@ class CusteboStudioApp {
 
           if (isSelected) {
             const edges = new THREE.EdgesGeometry(cloned);
-            group.add(new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x60a5fa })));
+            group.add(new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: edgeColor })));
           }
         };
 
@@ -716,6 +698,16 @@ class CusteboStudioApp {
               pm.receiveShadow = true;
               pm.userData.nodeId = node.id;
               group.add(pm);
+              if (isSelected) {
+                const edges = new THREE.EdgesGeometry(gClone);
+                const lineSeg = new THREE.LineSegments(
+                  edges,
+                  new THREE.LineBasicMaterial({ color: edgeColor })
+                );
+                lineSeg.position.copy(pm.position);
+                lineSeg.rotation.copy(pm.rotation);
+                group.add(lineSeg);
+              }
               continue;
             } else {
               const url = `/meshes/${encodeURIComponent(mf)}`;
@@ -753,7 +745,7 @@ class CusteboStudioApp {
             const edges = new THREE.EdgesGeometry(partGeom);
             const lineSeg = new THREE.LineSegments(
               edges,
-              new THREE.LineBasicMaterial({ color: 0x60a5fa })
+              new THREE.LineBasicMaterial({ color: edgeColor })
             );
             lineSeg.position.copy(partMesh.position);
             lineSeg.rotation.copy(partMesh.rotation);
@@ -802,7 +794,7 @@ class CusteboStudioApp {
 
         if (isSelected) {
           const edges = new THREE.EdgesGeometry(bufferGeom);
-          const lineMat = new THREE.LineBasicMaterial({ color: 0x60a5fa });
+          const lineMat = new THREE.LineBasicMaterial({ color: edgeColor });
           group.add(new THREE.LineSegments(edges, lineMat));
         }
 
@@ -3245,11 +3237,34 @@ class CusteboStudioApp {
       }
     });
 
-    // Custom 3D Mesh Upload Assistant ("➕ Importar 3D" in Objetos Personalizados)
-    const meshDrawer = document.getElementById("mesh-import-drawer");
-    document.getElementById("btn-open-mesh-import").addEventListener("click", () => {
-      meshDrawer.classList.toggle("hidden");
-    });
+    // Collapsible sections in Librería de Elementos with explicit boolean `isOpen`:
+    // When closed (`isOpen === false`) -> button reads "Abrir"
+    // When open   (`isOpen === true`)  -> button reads "Cerrar"
+    const bindLibrarySectionToggle = (btnId, contentId, onOpen = null) => {
+      const btnEl = document.getElementById(btnId);
+      const contentEl = document.getElementById(contentId);
+      if (!btnEl || !contentEl) return null;
+      let isOpen = !contentEl.classList.contains("hidden");
+      const syncState = (nextOpen) => {
+        isOpen = Boolean(nextOpen);
+        contentEl.classList.toggle("hidden", !isOpen);
+        btnEl.textContent = isOpen ? "Cerrar" : "Abrir";
+      };
+      syncState(isOpen);
+      btnEl.addEventListener("click", () => {
+        syncState(!isOpen);
+        if (isOpen && typeof onOpen === "function") {
+          onOpen();
+        }
+      });
+      return { setOpen: syncState, isOpen: () => isOpen };
+    };
+
+    bindLibrarySectionToggle("btn-toggle-cat-arch", "cat-grid-arch");
+    bindLibrarySectionToggle("btn-toggle-cat-roads", "cat-grid-roads");
+    bindLibrarySectionToggle("btn-toggle-cat-warehouse", "cat-grid-warehouse");
+    bindLibrarySectionToggle("btn-toggle-cat-prim", "cat-grid-prim");
+    const meshDrawerToggle = bindLibrarySectionToggle("btn-open-mesh-import", "mesh-import-drawer");
 
     const meshFileInput = document.getElementById("file-mesh-input");
     document.getElementById("btn-pick-mesh-file").addEventListener("click", () => {
@@ -3285,7 +3300,7 @@ class CusteboStudioApp {
       if (data.ok) {
         if (data.selected_node_id) this.selectedNodeId = data.selected_node_id;
         this._applyBackendPayload(data);
-        meshDrawer.classList.add("hidden");
+        meshDrawerToggle?.setOpen(false);
         this._setStatus(`Malla '${file.name}' añadida a Objetos Personalizados e insertada en escena`);
       } else {
         this._setStatus(`Error importando malla: ${data.error}`);
@@ -3293,7 +3308,6 @@ class CusteboStudioApp {
     });
 
     // Gazebo Fuel & ROS 2 Workspace Browser Drawer
-    const fuelDrawer = document.getElementById("fuel-browser-drawer");
     const runFuelSearch = async () => {
       const q = document.getElementById("fuel-search-input").value.trim();
       const listEl = document.getElementById("fuel-results-list");
@@ -3343,19 +3357,11 @@ class CusteboStudioApp {
       }
     };
 
-    document.getElementById("btn-toggle-fuel").addEventListener("click", () => {
-      fuelDrawer.classList.toggle("hidden");
-      if (!fuelDrawer.classList.contains("hidden")) {
-        runFuelSearch();
-      }
-    });
+    bindLibrarySectionToggle("btn-toggle-fuel", "fuel-browser-drawer", runFuelSearch);
     document.getElementById("btn-fuel-search-go").addEventListener("click", runFuelSearch);
 
     // Phase 3: Procedural & CAD Tools Drawer
-    const procDrawer = document.getElementById("procedural-drawer");
-    document.getElementById("btn-toggle-procedural")?.addEventListener("click", () => {
-      procDrawer?.classList.toggle("hidden");
-    });
+    bindLibrarySectionToggle("btn-toggle-procedural", "procedural-drawer");
 
     // 1. Grid Array Cloner
     document.getElementById("btn-run-grid-array")?.addEventListener("click", () => {
@@ -3586,10 +3592,7 @@ class CusteboStudioApp {
     // =========================================================================
     // Phase 4: ROS 2, Nav2, Sensors, Dynamic Actors & Parametric XACRO
     // =========================================================================
-    const ros2Drawer = document.getElementById("ros2-drawer");
-    document.getElementById("btn-toggle-ros2")?.addEventListener("click", () => {
-      ros2Drawer?.classList.toggle("hidden");
-    });
+    bindLibrarySectionToggle("btn-toggle-ros2", "ros2-drawer");
 
     // 4.1 Instant 2D Occupancy Map Generator (map.pgm + map.yaml) + Live Canvas Preview
     const generateAndRenderNav2Map = async (triggerDownload = false) => {
