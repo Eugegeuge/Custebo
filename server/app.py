@@ -48,8 +48,10 @@ from core.compilers import SDFCompiler
 from core.compilers.xacro_compiler import compile_scene_to_xacro
 from core.importers import (
     analyze_mesh_file,
+    build_procedural_fuel_parts,
     ensure_sample_cad_meshes,
     generate_collision_proxy_meshes,
+    parse_local_model_sdf_visuals,
     parse_sdf_to_scene_graph,
     scan_ros2_workspaces,
     search_gazebo_fuel,
@@ -451,13 +453,18 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
             size = body.get("size", [1.0, 1.0, 1.0])
             color = body.get("color", [0.30, 0.62, 0.90, 1.0])
             is_static = bool(body.get("static", True))
-            proxy_arch = body.get("proxy_archetype")
+            proxy_arch = str(body.get("proxy_archetype") or "")
+            source_path = str(body.get("source_path") or "")
 
-            parts = []
-            if proxy_arch and proxy_arch in ARCHETYPE_CATALOG:
-                temp_arch = create_archetype_node(proxy_arch)
-                parts = temp_arch.get("parts", [])
-                size = temp_arch.get("geometry", {}).get("size", size)
+            parts: List[Dict[str, Any]] = []
+            local_parsed = parse_local_model_sdf_visuals(source_path, meshes_dest_dir=MESHES_DIR)
+            if local_parsed and "parts" in local_parsed:
+                parts = local_parsed["parts"]
+            else:
+                parts, proc_size, proc_color = build_procedural_fuel_parts(proxy_arch, name)
+                size = proc_size
+                if not body.get("color"):
+                    color = proc_color
 
             z0 = round(float(size[2]) * 0.5, 4)
             inc_node: Dict[str, Any] = {
@@ -472,7 +479,7 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
                 "scale": [1.0, 1.0, 1.0],
                 "include": {"uri": uri},
                 "geometry": {"shape": "box", "size": list(size)},
-                "material": {"color": list(color), "roughness": 0.5, "metalness": 0.2},
+                "material": {"color": list(color), "roughness": 0.45, "metalness": 0.2},
                 "parts": parts,
             }
             cmd = AddNodeCommand(inc_node)
@@ -662,10 +669,10 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
 
         elif cmd_type == "generate_terrain":
             profile = str(body.get("profile", body.get("preset", "hills")))
-            sx = float(body.get("size_x", body.get("width", 12.0)))
-            sy = float(body.get("size_y", body.get("depth", 12.0)))
-            mh = float(body.get("max_height", body.get("amplitude", 0.80)))
-            res = int(body.get("grid_res", 7))
+            sx = float(body.get("size_x", body.get("width", 16.0)))
+            sy = float(body.get("size_y", body.get("depth", 16.0)))
+            mh = float(body.get("max_height", body.get("amplitude", 1.50)))
+            res = int(body.get("grid_res", 24))
             tnode = create_parametric_terrain_node(
                 name=f"terreno_{profile}",
                 size_x=sx,
@@ -674,6 +681,7 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
                 grid_res=res,
                 profile=profile,
                 heightmaps_dir=ASSETS_DIR / "heightmaps",
+                meshes_dir=MESHES_DIR,
             )
             cmd = AddNodeCommand(tnode)
             SESSION.manager.execute(cmd)
@@ -834,13 +842,32 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
         self._send_json(SESSION.build_full_Payload())
 
     def _handle_import_pgm_walls(self, body: Dict[str, Any]) -> None:
-        b64_data = str(body.get("content_base64", body.get("pgm_base64", "")))
-        if not b64_data:
-            self._send_json({"ok": False, "error": "Archivo PGM vacío."}, HTTPStatus.BAD_REQUEST)
-            return
-        raw_bytes = base64.b64decode(b64_data)
         resolution = float(body.get("resolution", 0.05))
         wall_height = float(body.get("wall_height", 2.50))
+
+        if body.get("use_demo_slam"):
+            # Synthesize a 200x160 (10m x 8m at 0.05m/px) SLAM floorplan PGM with outer walls & rooms
+            w_px, h_px = 200, 160
+            pixels = bytearray([254] * (w_px * h_px))
+            for x in range(20, 180):
+                pixels[20 * w_px + x] = 0  # Top wall
+                if not (90 <= x <= 115):
+                    pixels[140 * w_px + x] = 0  # Bottom wall with doorway
+            for y in range(20, 141):
+                pixels[y * w_px + 20] = 0  # Left wall
+                pixels[y * w_px + 179] = 0  # Right wall
+            for y in range(20, 95):
+                pixels[y * w_px + 100] = 0  # Interior divider wall
+            for x in range(20, 75):
+                pixels[85 * w_px + x] = 0  # Interior room wall
+            raw_bytes = f"P5\n{w_px} {h_px}\n255\n".encode("ascii") + bytes(pixels)
+        else:
+            b64_data = str(body.get("content_base64", body.get("pgm_base64", "")))
+            if not b64_data:
+                self._send_json({"ok": False, "error": "Archivo PGM vacío."}, HTTPStatus.BAD_REQUEST)
+                return
+            raw_bytes = base64.b64decode(b64_data)
+
         walls = reconstruct_3d_walls_from_pgm(
             raw_bytes, resolution=resolution, wall_height=wall_height
         )

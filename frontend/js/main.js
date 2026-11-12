@@ -61,6 +61,11 @@ class CusteboStudioApp {
     // Map of node_id -> THREE.Group in the 3D scene
     this.nodeObjectMap = new Map();
     this.isDraggingGizmo = false;
+    this.activeViewportTool = null;
+    this.rulerPoints = [];
+    this.floorplanPoints = [];
+    this.splinePoints = [];
+    this.cursorWorldPt = [0, 0, 0];
 
     this._initThreeViewport();
     this._bindToolbarAndShortcuts();
@@ -143,12 +148,16 @@ class CusteboStudioApp {
       }
     });
 
-    // Raycaster for clicking objects in the 3D scene
+    // Raycaster for clicking & live previewing tools in the 3D scene
     this.raycaster = new THREE.Raycaster();
     this.pointerDownPos = new THREE.Vector2();
 
     this.renderer.domElement.addEventListener("pointerdown", (e) => {
       this.pointerDownPos.set(e.clientX, e.clientY);
+    });
+
+    this.renderer.domElement.addEventListener("pointermove", (e) => {
+      this._handleViewportPointerMove(e);
     });
 
     this.renderer.domElement.addEventListener("pointerup", (e) => {
@@ -161,6 +170,10 @@ class CusteboStudioApp {
 
     this.nodesRootGroup = new THREE.Group();
     this.scene.add(this.nodesRootGroup);
+
+    // Interactive 3D Tool Overlay Group (Wall Tracer 3D preview, Laser Ruler, Spline, Scatter Brush)
+    this.toolOverlayGroup = new THREE.Group();
+    this.scene.add(this.toolOverlayGroup);
 
     window.addEventListener("resize", () => this._onResize());
     this._animate();
@@ -568,7 +581,7 @@ class CusteboStudioApp {
       };
 
       if (parts) {
-        // Render all sub-parts of the parametric composite / archetype
+        // Render all sub-parts of the parametric composite / archetype / Fuel / ROS 2 model
         for (const p of parts) {
           const pShape = p.shape || "box";
           const pSize = p.size || [1, 1, 1];
@@ -577,7 +590,6 @@ class CusteboStudioApp {
           const pColor = p.color || node.material?.color || [0.75, 0.78, 0.82, 1.0];
           const lp = p.local_pose || [0, 0, 0, 0, 0, 0];
 
-          const partGeom = buildPartBufferGeom(pShape, pSize, pRad, pLen);
           const partMat = new THREE.MeshStandardMaterial({
             color: new THREE.Color(pColor[0], pColor[1], pColor[2]),
             roughness: Number(node.material?.roughness ?? 0.55),
@@ -585,6 +597,45 @@ class CusteboStudioApp {
             transparent: this.debugLayers.inertia,
             opacity: this.debugLayers.inertia ? 0.45 : 1.0,
           });
+
+          if (pShape === "mesh" && p.mesh_filename) {
+            const mf = p.mesh_filename;
+            const mScale = p.mesh_scale || [1, 1, 1];
+            if (this.meshGeometryCache.has(mf)) {
+              const gClone = this.meshGeometryCache.get(mf).clone();
+              gClone.scale(mScale[0], mScale[1], mScale[2]);
+              gClone.computeVertexNormals();
+              const pm = new THREE.Mesh(gClone, partMat);
+              pm.position.set(lp[0], lp[1], lp[2]);
+              pm.rotation.set(lp[3], lp[4], lp[5], "ZYX");
+              pm.castShadow = true;
+              pm.receiveShadow = true;
+              pm.userData.nodeId = node.id;
+              group.add(pm);
+              continue;
+            } else {
+              const url = `/meshes/${encodeURIComponent(mf)}`;
+              if (mf.toLowerCase().endsWith(".stl")) {
+                this.stlLoader.load(url, (loadedGeom) => {
+                  this.meshGeometryCache.set(mf, loadedGeom);
+                  this._rebuild3DSceneFromGraph();
+                });
+              } else if (mf.toLowerCase().endsWith(".obj")) {
+                this.objLoader.load(url, (objGroup) => {
+                  let foundGeom = null;
+                  objGroup.traverse((ch) => {
+                    if (ch.isMesh && !foundGeom) foundGeom = ch.geometry.clone();
+                  });
+                  if (foundGeom) {
+                    this.meshGeometryCache.set(mf, foundGeom);
+                    this._rebuild3DSceneFromGraph();
+                  }
+                });
+              }
+            }
+          }
+
+          const partGeom = buildPartBufferGeom(pShape === "mesh" ? "box" : pShape, pSize, pRad, pLen);
 
           const partMesh = new THREE.Mesh(partGeom, partMat);
           partMesh.position.set(lp[0], lp[1], lp[2]);
@@ -899,61 +950,433 @@ class CusteboStudioApp {
     return group;
   }
 
-  _handleViewportClick(event) {
+  _raycastGroundOrSurface(event, allow3DSurface = false) {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const mouse = new THREE.Vector2(
       ((event.clientX - rect.left) / rect.width) * 2 - 1,
       -((event.clientY - rect.top) / rect.height) * 2 + 1
     );
-
     this.raycaster.setFromCamera(mouse, this.activeCamera);
 
-    // Interactive 3D Ruler, 2D->3D Floorplan Tracer, or Nav2 Waypoint Dropper
-    if (
-      this.activeViewportTool === "ruler" ||
-      this.activeViewportTool === "floorplan" ||
-      this.activeViewportTool === "waypoint"
-    ) {
-      const groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
-      const hitPt = new THREE.Vector3();
-      if (this.raycaster.ray.intersectPlane(groundPlane, hitPt)) {
-        const pt = [Number(hitPt.x.toFixed(3)), Number(hitPt.y.toFixed(3)), 0.0];
-        if (this.activeViewportTool === "waypoint") {
-          this.sendCommand({
-            type: "add_waypoint",
-            pose: [pt[0], pt[1], 0.02, 0.0, 0.0, 0.0],
-          });
-          this._setStatus(`📍 Waypoint Nav2 colocado en [${pt[0]}, ${pt[1]}] m (Esc para salir)`);
-          return;
-        }
-        if (this.activeViewportTool === "ruler") {
-          this.rulerPoints = this.rulerPoints || [];
-          this.rulerPoints.push(pt);
-          if (this.rulerPoints.length === 1) {
-            this._setStatus(`📏 Regla 3D: P1 = [${pt[0]}, ${pt[1]}, 0] m. Haz clic en el segundo punto.`);
-          } else {
-            const p1 = this.rulerPoints[0];
-            const p2 = this.rulerPoints[1];
-            this.rulerPoints = [];
-            const dx = p2[0] - p1[0];
-            const dy = p2[1] - p1[1];
-            const dist = Math.hypot(dx, dy);
-            const yawDeg = ((Math.atan2(dy, dx) * 180) / Math.PI).toFixed(1);
-            this._setStatus(
-              `📏 Distancia: ${dist.toFixed(3)} m | ΔX=${dx.toFixed(2)}m, ΔY=${dy.toFixed(2)}m | Yaw=${yawDeg}°`
-            );
+    if (allow3DSurface) {
+      const meshes = [];
+      this.nodesRootGroup.traverse((obj) => {
+        if (obj.isMesh && obj.userData.nodeId) {
+          const n = this.sceneGraph?.nodes?.find((x) => x.id === obj.userData.nodeId);
+          if (n && n.type !== "ground_plane" && obj.visible) {
+            meshes.push(obj);
           }
-          return;
-        } else if (this.activeViewportTool === "floorplan") {
-          this.floorplanPoints = this.floorplanPoints || [];
-          this.floorplanPoints.push([pt[0], pt[1]]);
-          this._setStatus(
-            `✏ Trazador 2D→3D: ${this.floorplanPoints.length} vértices añadidos ([${pt[0]}, ${pt[1]}]). Pulsa Enter para extruir muros o Esc para cancelar.`
-          );
-          return;
         }
+      });
+      const hits = this.raycaster.intersectObjects(meshes, false);
+      if (hits.length > 0) {
+        const p = hits[0].point;
+        return [Number(p.x.toFixed(3)), Number(p.y.toFixed(3)), Number(p.z.toFixed(3))];
       }
     }
+
+    const groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+    const hitPt = new THREE.Vector3();
+    if (this.raycaster.ray.intersectPlane(groundPlane, hitPt)) {
+      return [Number(hitPt.x.toFixed(3)), Number(hitPt.y.toFixed(3)), 0.0];
+    }
+    return null;
+  }
+
+  _handleViewportPointerMove(event) {
+    if (!this.activeViewportTool || this.isDraggingGizmo) return;
+    const pt = this._raycastGroundOrSurface(event, this.activeViewportTool === "ruler");
+    if (pt) {
+      this.cursorWorldPt = pt;
+      this._updateToolOverlay3D(pt);
+    }
+  }
+
+  _updateToolOverlay3D(cursorPt = null) {
+    if (!this.toolOverlayGroup) return;
+    while (this.toolOverlayGroup.children.length > 0) {
+      this.toolOverlayGroup.remove(this.toolOverlayGroup.children[0]);
+    }
+
+    if (!this.activeViewportTool) return;
+
+    // -----------------------------------------------------------------------
+    // 1. INTERACTIVE 2D->3D WALL TRACER OVERLAY & LIVE POPUP STATS
+    // -----------------------------------------------------------------------
+    if (this.activeViewportTool === "floorplan") {
+      const h = Math.max(0.3, parseFloat(document.getElementById("fp-wall-height")?.value || "2.50"));
+      const t = Math.max(0.05, parseFloat(document.getElementById("fp-wall-thick")?.value || "0.20"));
+      const closed = Boolean(document.getElementById("fp-wall-closed")?.checked);
+      const pts = this.floorplanPoints || [];
+
+      // Draw glowing cyan corner posts at every clicked vertex + live cursor target
+      const postMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8 });
+      for (const p of pts) {
+        const sp = new THREE.Mesh(new THREE.SphereGeometry(0.14, 16, 12), postMat);
+        sp.position.set(p[0], p[1], 0.14);
+        this.toolOverlayGroup.add(sp);
+
+        // Vertical height guide pole showing exact wall height H
+        const poleGeom = new THREE.CylinderGeometry(0.03, 0.03, h, 10);
+        poleGeom.rotateX(Math.PI / 2);
+        const pole = new THREE.Mesh(
+          poleGeom,
+          new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.7 })
+        );
+        pole.position.set(p[0], p[1], h * 0.5);
+        this.toolOverlayGroup.add(pole);
+      }
+
+      if (cursorPt) {
+        const curRing = new THREE.Mesh(
+          new THREE.RingGeometry(0.12, 0.22, 24),
+          new THREE.MeshBasicMaterial({ color: 0xfacc15, side: THREE.DoubleSide })
+        );
+        curRing.position.set(cursorPt[0], cursorPt[1], 0.02);
+        this.toolOverlayGroup.add(curRing);
+      }
+
+      // Build committed wall segments + rubber-band segment to cursorPt
+      const segments = [];
+      for (let i = 0; i < pts.length - 1; i++) {
+        segments.push({ a: pts[i], b: pts[i + 1], isLive: false });
+      }
+      if (pts.length >= 1 && cursorPt) {
+        segments.push({ a: pts[pts.length - 1], b: [cursorPt[0], cursorPt[1]], isLive: true });
+      }
+      if (closed && pts.length >= 2) {
+        const lastPt = cursorPt ? [cursorPt[0], cursorPt[1]] : pts[pts.length - 1];
+        segments.push({ a: lastPt, b: pts[0], isLive: true });
+      }
+
+      for (const seg of segments) {
+        const dx = seg.b[0] - seg.a[0];
+        const dy = seg.b[1] - seg.a[1];
+        const len = Math.hypot(dx, dy);
+        if (len < 0.05) continue;
+        const mx = (seg.a[0] + seg.b[0]) * 0.5;
+        const my = (seg.a[1] + seg.b[1]) * 0.5;
+        const yaw = Math.atan2(dy, dx);
+
+        const wallGeom = new THREE.BoxGeometry(len, t, h);
+        const wallMat = new THREE.MeshStandardMaterial({
+          color: seg.isLive ? 0xfacc15 : 0x38bdf8,
+          transparent: true,
+          opacity: seg.isLive ? 0.35 : 0.52,
+          roughness: 0.4,
+        });
+        const wallMesh = new THREE.Mesh(wallGeom, wallMat);
+        wallMesh.position.set(mx, my, h * 0.5);
+        wallMesh.rotation.set(0, 0, yaw, "ZYX");
+        this.toolOverlayGroup.add(wallMesh);
+
+        const edges = new THREE.EdgesGeometry(wallGeom);
+        const edgeLine = new THREE.LineSegments(
+          edges,
+          new THREE.LineBasicMaterial({ color: seg.isLive ? 0xfde047 : 0x7dd3fc })
+        );
+        edgeLine.position.copy(wallMesh.position);
+        edgeLine.rotation.copy(wallMesh.rotation);
+        this.toolOverlayGroup.add(edgeLine);
+      }
+
+      // Update popup readout
+      const countEl = document.getElementById("fp-vertex-count");
+      const infoEl = document.getElementById("fp-segment-info");
+      if (countEl) {
+        countEl.textContent = `${pts.length} esquina${pts.length === 1 ? "" : "s"} marcada${pts.length === 1 ? "" : "s"} (Altura: ${h.toFixed(2)} m)`;
+      }
+      if (infoEl) {
+        if (pts.length >= 1 && cursorPt) {
+          const last = pts[pts.length - 1];
+          const segLen = Math.hypot(cursorPt[0] - last[0], cursorPt[1] - last[1]);
+          const segYaw = ((Math.atan2(cursorPt[1] - last[1], cursorPt[0] - last[0]) * 180) / Math.PI).toFixed(1);
+          infoEl.textContent = `Tramo actual: ${segLen.toFixed(2)} m · Ángulo: ${segYaw}°`;
+        } else if (cursorPt) {
+          infoEl.textContent = `Cursor en [${cursorPt[0].toFixed(2)}, ${cursorPt[1].toFixed(2)}] m — Haz clic para fijar 1ª esquina`;
+        }
+      }
+      return;
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. 3D LASER RULER & PROTRACTOR OVERLAY & POPUP READOUT
+    // -----------------------------------------------------------------------
+    if (this.activeViewportTool === "ruler") {
+      const rPts = this.rulerPoints || [];
+      const p1 = rPts.length >= 1 ? rPts[0] : cursorPt;
+      const p2 = rPts.length >= 2 ? rPts[1] : rPts.length === 1 ? cursorPt : null;
+
+      if (p1) {
+        const m1 = new THREE.Mesh(
+          new THREE.SphereGeometry(0.13, 16, 12),
+          new THREE.MeshBasicMaterial({ color: 0x22c55e })
+        );
+        m1.position.set(p1[0], p1[1], Math.max(0.13, p1[2] || 0));
+        this.toolOverlayGroup.add(m1);
+      }
+
+      if (p1 && p2) {
+        const m2 = new THREE.Mesh(
+          new THREE.SphereGeometry(0.13, 16, 12),
+          new THREE.MeshBasicMaterial({ color: 0xef4444 })
+        );
+        m2.position.set(p2[0], p2[1], Math.max(0.13, p2[2] || 0));
+        this.toolOverlayGroup.add(m2);
+
+        const z1 = Math.max(0.06, p1[2] || 0);
+        const z2 = Math.max(0.06, p2[2] || 0);
+
+        // Main yellow 3D laser line
+        const mainLineGeom = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(p1[0], p1[1], z1),
+          new THREE.Vector3(p2[0], p2[1], z2),
+        ]);
+        this.toolOverlayGroup.add(
+          new THREE.Line(mainLineGeom, new THREE.LineBasicMaterial({ color: 0xfacc15, linewidth: 3 }))
+        );
+
+        // Right-triangle ΔX (red) and ΔY (green) breakdown on the floor
+        const cornerPt = new THREE.Vector3(p2[0], p1[1], z1);
+        const dxGeom = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(p1[0], p1[1], z1),
+          cornerPt,
+        ]);
+        const dyGeom = new THREE.BufferGeometry().setFromPoints([
+          cornerPt,
+          new THREE.Vector3(p2[0], p2[1], z1),
+        ]);
+        this.toolOverlayGroup.add(
+          new THREE.Line(dxGeom, new THREE.LineBasicMaterial({ color: 0xef4444 }))
+        );
+        this.toolOverlayGroup.add(
+          new THREE.Line(dyGeom, new THREE.LineBasicMaterial({ color: 0x22c55e }))
+        );
+
+        const dx = p2[0] - p1[0];
+        const dy = p2[1] - p1[1];
+        const dz = (p2[2] || 0) - (p1[2] || 0);
+        const dist3d = Math.hypot(dx, dy, dz);
+        const yawRad = Math.atan2(dy, dx);
+        const yawDeg = (yawRad * 180) / Math.PI;
+
+        const distEl = document.getElementById("ruler-dist-main");
+        const deltasEl = document.getElementById("ruler-deltas");
+        const anglesEl = document.getElementById("ruler-angles");
+        if (distEl) distEl.textContent = `${dist3d.toFixed(3)} m`;
+        if (deltasEl) {
+          deltasEl.textContent = `ΔX: ${dx.toFixed(2)} m · ΔY: ${dy.toFixed(2)} m · ΔZ: ${dz.toFixed(2)} m`;
+        }
+        if (anglesEl) {
+          anglesEl.textContent = `Yaw ENU: ${yawDeg.toFixed(1)}° (${yawRad.toFixed(3)} rad)`;
+        }
+      }
+      return;
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. INTERACTIVE 3D SPLINE / CURVE TRACER OVERLAY
+    // -----------------------------------------------------------------------
+    if (this.activeViewportTool === "spline") {
+      const sPts = [...(this.splinePoints || [])];
+      if (cursorPt) sPts.push([cursorPt[0], cursorPt[1]]);
+
+      for (const p of sPts) {
+        const sp = new THREE.Mesh(
+          new THREE.SphereGeometry(0.12, 14, 10),
+          new THREE.MeshBasicMaterial({ color: 0xfacc15 })
+        );
+        sp.position.set(p[0], p[1], 0.12);
+        this.toolOverlayGroup.add(sp);
+      }
+
+      if (sPts.length >= 2) {
+        const vecs = sPts.map((p) => new THREE.Vector3(p[0], p[1], 0.08));
+        const curve = new THREE.CatmullRomCurve3(vecs);
+        const sampled = curve.getPoints(48);
+        const curveGeom = new THREE.BufferGeometry().setFromPoints(sampled);
+        this.toolOverlayGroup.add(
+          new THREE.Line(curveGeom, new THREE.LineBasicMaterial({ color: 0x38bdf8, linewidth: 2 }))
+        );
+      }
+
+      const infoEl = document.getElementById("spline-live-info");
+      if (infoEl) {
+        const c = (this.splinePoints || []).length;
+        infoEl.innerHTML = `<span style="color:#fde047;font-weight:700;">${c} punto${c === 1 ? "" : "s"} fijado${c === 1 ? "" : "s"} en la curva</span>`;
+      }
+      return;
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. INTERACTIVE 3D SCATTER BRUSH RING OVERLAY
+    // -----------------------------------------------------------------------
+    if (this.activeViewportTool === "scatter_paint" && cursorPt) {
+      const r = Math.max(0.5, parseFloat(document.getElementById("scatter-radius")?.value || "6.0"));
+      const ringGeom = new THREE.RingGeometry(Math.max(0.1, r - 0.12), r, 48);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0x10b981,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.65,
+      });
+      const ringMesh = new THREE.Mesh(ringGeom, ringMat);
+      ringMesh.position.set(cursorPt[0], cursorPt[1], 0.03);
+      this.toolOverlayGroup.add(ringMesh);
+
+      const discGeom = new THREE.CircleGeometry(r, 48);
+      const discMat = new THREE.MeshBasicMaterial({
+        color: 0x10b981,
+        transparent: true,
+        opacity: 0.12,
+      });
+      const discMesh = new THREE.Mesh(discGeom, discMat);
+      discMesh.position.set(cursorPt[0], cursorPt[1], 0.02);
+      this.toolOverlayGroup.add(discMesh);
+      return;
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. NAV2 WAYPOINT TARGET PREVIEW
+    // -----------------------------------------------------------------------
+    if (this.activeViewportTool === "waypoint" && cursorPt) {
+      const wpRing = new THREE.Mesh(
+        new THREE.RingGeometry(0.18, 0.30, 24),
+        new THREE.MeshBasicMaterial({ color: 0x06b6d4, side: THREE.DoubleSide })
+      );
+      wpRing.position.set(cursorPt[0], cursorPt[1], 0.03);
+      this.toolOverlayGroup.add(wpRing);
+    }
+  }
+
+  _commitFloorplanWalls() {
+    const pts = [...(this.floorplanPoints || [])];
+    const h = Math.max(0.3, parseFloat(document.getElementById("fp-wall-height")?.value || "2.50"));
+    const t = Math.max(0.05, parseFloat(document.getElementById("fp-wall-thick")?.value || "0.20"));
+    const wallType = document.getElementById("fp-wall-type")?.value || "wall";
+    const closed = Boolean(document.getElementById("fp-wall-closed")?.checked);
+
+    if (pts.length < 2) {
+      this._setStatus("⚠ Haz clic en al menos 2 esquinas sobre el suelo 3D antes de levantar los muros (o usa '⚡ Crear Recinto Rápido').");
+      return;
+    }
+
+    this.sendCommand({
+      type: "extrude_floorplan",
+      points: pts,
+      height: h,
+      thickness: t,
+      wall_type: wallType,
+      closed,
+    });
+    const segCount = closed && pts.length >= 3 ? pts.length : pts.length - 1;
+    this.floorplanPoints = [];
+    this._updateToolOverlay3D(this.cursorWorldPt);
+    this._setStatus(`🧱 Levantados ${segCount} muros 3D (altura ${h.toFixed(2)} m, grosor ${t.toFixed(2)} m)`);
+  }
+
+  _commitSplineClones() {
+    const pts = [...(this.splinePoints || [])];
+    if (pts.length < 2) {
+      this._setStatus("⚠ Haz clic en al menos 2 puntos del suelo para trazar la curva Bézier.");
+      return;
+    }
+    const count = parseInt(document.getElementById("spline-count")?.value || "7", 10);
+    const alignTan = Boolean(document.getElementById("spline-tangent")?.checked ?? true);
+    this.sendCommand({
+      type: "spline_clone",
+      node_id: this.selectedNodeId || "",
+      control_points: pts,
+      count,
+      align_tangent: alignTan,
+    });
+    this.splinePoints = [];
+    this._updateToolOverlay3D(this.cursorWorldPt);
+    this._setStatus(`〰 Clonados ${count} objetos a lo largo de la curva trazada`);
+  }
+
+  _handleViewportClick(event) {
+    // Interactive 3D Viewport Tools: Floorplan Wall Tracer, 3D Laser Ruler, Spline Tracer, Scatter Brush, Waypoint
+    if (this.activeViewportTool) {
+      const pt = this._raycastGroundOrSurface(event, this.activeViewportTool === "ruler");
+      if (!pt) return;
+
+      if (this.activeViewportTool === "waypoint") {
+        this.sendCommand({
+          type: "add_waypoint",
+          pose: [pt[0], pt[1], 0.02, 0.0, 0.0, 0.0],
+        });
+        this._setStatus(`📍 Waypoint Nav2 colocado en [${pt[0]}, ${pt[1]}] m (Esc para salir)`);
+        return;
+      }
+
+      if (this.activeViewportTool === "ruler") {
+        this.rulerPoints = this.rulerPoints || [];
+        if (this.rulerPoints.length >= 2) {
+          this.rulerPoints = [pt];
+        } else {
+          this.rulerPoints.push(pt);
+        }
+        this._updateToolOverlay3D(pt);
+        if (this.rulerPoints.length === 1) {
+          this._setStatus(`📏 Regla 3D: Punto 1 fijado en [${pt[0]}, ${pt[1]}, ${pt[2]}] m. Mueve el ratón y haz clic en el Punto 2.`);
+        } else {
+          const p1 = this.rulerPoints[0];
+          const p2 = this.rulerPoints[1];
+          const dist = Math.hypot(p2[0] - p1[0], p2[1] - p1[1], (p2[2] || 0) - (p1[2] || 0));
+          this._setStatus(`📏 Medida fijada: ${dist.toFixed(3)} m (Haz clic de nuevo para iniciar otra medida)`);
+        }
+        return;
+      }
+
+      if (this.activeViewportTool === "floorplan") {
+        this.floorplanPoints = this.floorplanPoints || [];
+        this.floorplanPoints.push([pt[0], pt[1]]);
+        this._updateToolOverlay3D(pt);
+        this._setStatus(
+          `🧱 Esquina #${this.floorplanPoints.length} marcada en [${pt[0]}, ${pt[1]}] m. Pulsa '🧱 Levantar Muros (Enter)' en el popup cuando termines.`
+        );
+        return;
+      }
+
+      if (this.activeViewportTool === "spline") {
+        this.splinePoints = this.splinePoints || [];
+        this.splinePoints.push([pt[0], pt[1]]);
+        this._updateToolOverlay3D(pt);
+        this._setStatus(
+          `〰 Punto de curva #${this.splinePoints.length} en [${pt[0]}, ${pt[1]}] m. Pulsa '〰 Clonar en Curva (Enter)' para generar.`
+        );
+        return;
+      }
+
+      if (this.activeViewportTool === "scatter_paint") {
+        const archSel = document.getElementById("scatter-arch")?.value || "cardboard_box";
+        const useSelected = archSel === "__selected__" && this.selectedNodeId;
+        const count = parseInt(document.getElementById("scatter-count")?.value || "10", 10);
+        const radius = parseFloat(document.getElementById("scatter-radius")?.value || "6.0");
+        const minDist = parseFloat(document.getElementById("scatter-mindist")?.value || "0.9");
+        this.sendCommand({
+          type: "scatter_brush",
+          node_id: useSelected ? this.selectedNodeId : "",
+          archetype: useSelected ? "cardboard_box" : archSel,
+          center_x: pt[0],
+          center_y: pt[1],
+          radius,
+          count,
+          min_distance: minDist,
+          seed: Math.floor(Math.random() * 100000),
+        });
+        this._setStatus(`🎯 Dispersados ${count} objetos en torno a [${pt[0]}, ${pt[1]}] m`);
+        return;
+      }
+    }
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1
+    );
+    this.raycaster.setFromCamera(mouse, this.activeCamera);
 
     const meshes = [];
     this.nodesRootGroup.traverse((obj) => {
@@ -2040,31 +2463,159 @@ class CusteboStudioApp {
     const btnSnapNeighbor = document.getElementById("btn-snap-neighbor");
     if (btnSnapNeighbor) btnSnapNeighbor.addEventListener("click", triggerSnapNeighbor);
 
-    // 3D Ruler & Angle Protractor (M) + 2D->3D Floorplan Tracer
+    // Interactive Viewport Tools + Floating Popups:
+    // - "ruler"       -> #popup-ruler
+    // - "floorplan"   -> #popup-wall-tracer
+    // - "spline"      -> #popup-spline-tracer
+    // - "scatter_paint"
+    // - "waypoint"
     const setViewportTool = (toolName) => {
       this.activeViewportTool = this.activeViewportTool === toolName ? null : toolName;
       this.rulerPoints = [];
       this.floorplanPoints = [];
+      this.splinePoints = [];
+
       document
         .getElementById("btn-tool-ruler")
         ?.classList.toggle("active", this.activeViewportTool === "ruler");
       document
         .getElementById("btn-tool-floorplan")
         ?.classList.toggle("active", this.activeViewportTool === "floorplan");
+      document
+        .getElementById("btn-open-wall-tracer-drawer")
+        ?.classList.toggle("active", this.activeViewportTool === "floorplan");
+      document
+        .getElementById("btn-trace-spline-3d")
+        ?.classList.toggle("active", this.activeViewportTool === "spline");
+      document
+        .getElementById("btn-paint-scatter-3d")
+        ?.classList.toggle("active", this.activeViewportTool === "scatter_paint");
+      document
+        .getElementById("btn-tool-waypoint")
+        ?.classList.toggle("active", this.activeViewportTool === "waypoint");
+
+      // Show/Hide Floating Popups
+      document
+        .getElementById("popup-wall-tracer")
+        ?.classList.toggle("hidden", this.activeViewportTool !== "floorplan");
+      document
+        .getElementById("popup-ruler")
+        ?.classList.toggle("hidden", this.activeViewportTool !== "ruler");
+      document
+        .getElementById("popup-spline-tracer")
+        ?.classList.toggle("hidden", this.activeViewportTool !== "spline");
+
+      this._updateToolOverlay3D(this.cursorWorldPt);
+
       if (this.activeViewportTool === "ruler") {
-        this._setStatus("📏 Modo Regla 3D activo: haz clic en 2 puntos del suelo para medir distancia y ángulo.");
+        this._setStatus("📏 Medidor Láser 3D activo: haz clic en 2 puntos del suelo o sobre objetos para medir.");
       } else if (this.activeViewportTool === "floorplan") {
-        this._setStatus("✏ Modo Trazador 2D→3D activo: haz clic en los vértices del plano y pulsa Enter para extruir muros.");
+        this._setStatus("🧱 Trazador de Muros 3D activo: haz clic en las esquinas sobre el suelo y pulsa '🧱 Levantar Muros'.");
+      } else if (this.activeViewportTool === "spline") {
+        this._setStatus("〰 Trazador de Curva Bézier 3D activo: haz clic en los puntos de la curva y pulsa '〰 Clonar en Curva'.");
+      } else if (this.activeViewportTool === "scatter_paint") {
+        this._setStatus("🎯 Pincel Scatter 3D activo: haz clic en cualquier zona del suelo para dispersar objetos.");
+      } else if (this.activeViewportTool === "waypoint") {
+        this._setStatus("📍 Modo Waypoint Nav2: haz clic en el suelo 3D para colocar puntos de ruta.");
       } else {
-        this._setStatus("Herramienta interactiva desactivada");
+        this._setStatus("Herramienta interactiva cerrada");
       }
     };
+
     document
       .getElementById("btn-tool-ruler")
       ?.addEventListener("click", () => setViewportTool("ruler"));
     document
       .getElementById("btn-tool-floorplan")
       ?.addEventListener("click", () => setViewportTool("floorplan"));
+    document
+      .getElementById("btn-open-wall-tracer-drawer")
+      ?.addEventListener("click", () => setViewportTool("floorplan"));
+    document
+      .getElementById("btn-trace-spline-3d")
+      ?.addEventListener("click", () => setViewportTool("spline"));
+    document
+      .getElementById("btn-paint-scatter-3d")
+      ?.addEventListener("click", () => setViewportTool("scatter_paint"));
+
+    // POPUP 1: Wall Tracer Controls
+    ["fp-wall-height", "fp-wall-thick", "fp-wall-type", "fp-wall-closed"].forEach((id) => {
+      document.getElementById(id)?.addEventListener("input", () => {
+        this._updateToolOverlay3D(this.cursorWorldPt);
+      });
+      document.getElementById(id)?.addEventListener("change", () => {
+        this._updateToolOverlay3D(this.cursorWorldPt);
+      });
+    });
+
+    document.getElementById("btn-fp-build-now")?.addEventListener("click", () => {
+      this._commitFloorplanWalls();
+    });
+
+    document.getElementById("btn-fp-undo-pt")?.addEventListener("click", () => {
+      if ((this.floorplanPoints || []).length > 0) {
+        this.floorplanPoints.pop();
+        this._updateToolOverlay3D(this.cursorWorldPt);
+        this._setStatus(`↩ Última esquina deshecha (${this.floorplanPoints.length} restantes)`);
+      }
+    });
+
+    document.getElementById("btn-fp-quick-room")?.addEventListener("click", () => {
+      const h = Math.max(0.3, parseFloat(document.getElementById("fp-wall-height")?.value || "2.50"));
+      const t = Math.max(0.05, parseFloat(document.getElementById("fp-wall-thick")?.value || "0.20"));
+      const wallType = document.getElementById("fp-wall-type")?.value || "wall";
+      const roomPts = [
+        [-4.0, -3.0],
+        [4.0, -3.0],
+        [4.0, 3.0],
+        [-4.0, 3.0],
+      ];
+      this.sendCommand({
+        type: "extrude_floorplan",
+        points: roomPts,
+        height: h,
+        thickness: t,
+        wall_type: wallType,
+        closed: true,
+      });
+      this._setStatus(`🧱 Recinto rápido 8×6 m levantado con altura ${h.toFixed(2)} m`);
+    });
+
+    document.getElementById("btn-close-wall-popup")?.addEventListener("click", () => {
+      if (this.activeViewportTool === "floorplan") setViewportTool("floorplan");
+    });
+
+    // POPUP 2: 3D Laser Ruler Controls
+    document.getElementById("btn-ruler-reset")?.addEventListener("click", () => {
+      this.rulerPoints = [];
+      const distEl = document.getElementById("ruler-dist-main");
+      const deltasEl = document.getElementById("ruler-deltas");
+      const anglesEl = document.getElementById("ruler-angles");
+      if (distEl) distEl.textContent = "0.000 m";
+      if (deltasEl) deltasEl.textContent = "ΔX: 0.00 m · ΔY: 0.00 m · ΔZ: 0.00 m";
+      if (anglesEl) anglesEl.textContent = "Yaw ENU: 0.0° (0.000 rad)";
+      this._updateToolOverlay3D(this.cursorWorldPt);
+      this._setStatus("📏 Medidor reiniciado. Haz clic en el Punto 1.");
+    });
+
+    document.getElementById("btn-ruler-done")?.addEventListener("click", () => {
+      if (this.activeViewportTool === "ruler") setViewportTool("ruler");
+    });
+    document.getElementById("btn-close-ruler-popup")?.addEventListener("click", () => {
+      if (this.activeViewportTool === "ruler") setViewportTool("ruler");
+    });
+
+    // POPUP 4: 3D Spline Tracer Controls
+    document.getElementById("btn-spline-build-now")?.addEventListener("click", () => {
+      this._commitSplineClones();
+    });
+    document.getElementById("btn-spline-clear-pts")?.addEventListener("click", () => {
+      this.splinePoints = [];
+      this._updateToolOverlay3D(this.cursorWorldPt);
+    });
+    document.getElementById("btn-close-spline-popup")?.addEventListener("click", () => {
+      if (this.activeViewportTool === "spline") setViewportTool("spline");
+    });
 
     // Grid & Angle Snapping
     document.getElementById("grid-snap-select").addEventListener("change", (e) => {
@@ -2314,7 +2865,7 @@ class CusteboStudioApp {
     const runFuelSearch = async () => {
       const q = document.getElementById("fuel-search-input").value.trim();
       const listEl = document.getElementById("fuel-results-list");
-      listEl.innerHTML = `<div style="font-size:11px;color:var(--text-muted);">Buscando modelos...</div>`;
+      listEl.innerHTML = `<div style="font-size:11px;color:var(--text-muted);">Buscando modelos 3D...</div>`;
       const res = await fetch(`/api/fuel_search?q=${encodeURIComponent(q)}`);
       const data = await res.json();
       if (!data.ok) return;
@@ -2334,11 +2885,11 @@ class CusteboStudioApp {
             static: m.static,
             proxy_archetype: m.proxy_archetype,
           });
-          this._setStatus(`Añadido <include> de Gazebo Fuel: ${m.model_name}`);
+          this._setStatus(`☁ Modelo 3D de Gazebo Fuel añadido: ${m.model_name}`);
         });
         listEl.appendChild(row);
       }
-      for (const rm of (data.ros_models || []).slice(0, 6)) {
+      for (const rm of (data.ros_models || []).slice(0, 12)) {
         const row = document.createElement("div");
         row.className = "custom-obj-row";
         row.innerHTML = `<span class="custom-obj-title">📦 [ROS 2] ${rm.name}</span>`;
@@ -2351,8 +2902,10 @@ class CusteboStudioApp {
             size: [1.0, 1.0, 1.0],
             color: [0.25, 0.70, 0.55, 1.0],
             static: true,
+            proxy_archetype: rm.proxy_archetype || "",
+            source_path: rm.source_path || "",
           });
-          this._setStatus(`Añadido modelo local ROS 2: ${rm.uri}`);
+          this._setStatus(`📦 Modelo local ROS 2 importado con geometría 3D: ${rm.uri}`);
         });
         listEl.appendChild(row);
       }
@@ -2375,7 +2928,7 @@ class CusteboStudioApp {
     // 1. Grid Array Cloner
     document.getElementById("btn-run-grid-array")?.addEventListener("click", () => {
       if (!this.selectedNodeId) {
-        this._setStatus("⚠ Selecciona primero un objeto para clonarlo en matriz 3D");
+        this._setStatus("⚠ Selecciona primero un objeto en el visor 3D para clonarlo en matriz");
         return;
       }
       const nx = parseInt(document.getElementById("arr-nx")?.value || "3", 10);
@@ -2383,7 +2936,7 @@ class CusteboStudioApp {
       const nz = parseInt(document.getElementById("arr-nz")?.value || "1", 10);
       const sx = parseFloat(document.getElementById("arr-sx")?.value || "2.5");
       const sy = parseFloat(document.getElementById("arr-sy")?.value || "2.5");
-      const sz = parseFloat(document.getElementById("arr-sz")?.value || "2.0");
+      const sz = parseFloat(document.getElementById("arr-sz")?.value || "2.2");
       this.sendCommand({
         type: "grid_array_clone",
         node_id: this.selectedNodeId,
@@ -2394,57 +2947,60 @@ class CusteboStudioApp {
         spacing_y: sy,
         spacing_z: sz,
       });
-      this._setStatus(`🔢 Creada matriz procedural ${nx}×${ny}×${nz}`);
+      this._setStatus(`🔢 Creada matriz procedural ${nx}×${ny}×${nz} con paso [${sx}, ${sy}, ${sz}] m`);
     });
 
-    // 2. Spline / Bezier Cloner
+    // 2. Spline / Bezier Cloner (Instant S-Curve or Traced 3D Curve)
     document.getElementById("btn-run-spline")?.addEventListener("click", () => {
-      if (!this.selectedNodeId) {
-        this._setStatus("⚠ Selecciona primero un objeto (valla, cono, bolardo) para clonar en curva");
-        return;
-      }
-      const count = parseInt(document.getElementById("spline-count")?.value || "8", 10);
-      const radius = parseFloat(document.getElementById("spline-radius")?.value || "10.0");
+      const count = parseInt(document.getElementById("spline-count")?.value || "7", 10);
+      const radius = parseFloat(document.getElementById("spline-radius")?.value || "8.0");
+      const alignTan = Boolean(document.getElementById("spline-tangent")?.checked ?? true);
       const node = this._getSelectedNode();
-      const [x0, y0] = node ? node.pose : [0, 0];
-      const controlPoints = [
-        [x0, y0],
-        [x0 + radius * 0.5, y0 + radius * 0.8],
-        [x0 + radius * 1.3, y0 - radius * 0.6],
-        [x0 + radius * 2.0, y0],
-      ];
+      const [x0, y0] = node ? node.pose : [-radius * 0.5, 0];
+      const controlPoints =
+        (this.splinePoints || []).length >= 2
+          ? [...this.splinePoints]
+          : [
+              [x0, y0],
+              [x0 + radius * 0.35, y0 + radius * 0.55],
+              [x0 + radius * 0.75, y0 - radius * 0.55],
+              [x0 + radius * 1.15, y0],
+            ];
       this.sendCommand({
         type: "spline_clone",
-        node_id: this.selectedNodeId,
+        node_id: this.selectedNodeId || "",
         control_points: controlPoints,
         count,
-        align_tangent: true,
+        align_tangent: alignTan,
       });
       this._setStatus(`〰 Creados ${count} clones orientados a lo largo de curva Bézier`);
     });
 
     // 3. Scatter Brush (Random distribution with AABB anti-overlap)
     document.getElementById("btn-run-scatter")?.addEventListener("click", () => {
-      const archetype = document.getElementById("scatter-arch")?.value || "cardboard_box";
-      const count = parseInt(document.getElementById("scatter-count")?.value || "12", 10);
-      const radius = parseFloat(document.getElementById("scatter-radius")?.value || "8.0");
+      const archSel = document.getElementById("scatter-arch")?.value || "cardboard_box";
+      const useSelected = archSel === "__selected__" && this.selectedNodeId;
+      const count = parseInt(document.getElementById("scatter-count")?.value || "10", 10);
+      const radius = parseFloat(document.getElementById("scatter-radius")?.value || "6.0");
+      const minDist = parseFloat(document.getElementById("scatter-mindist")?.value || "0.9");
       const centerNode = this._getSelectedNode();
-      const cx = centerNode ? centerNode.pose[0] : 0.0;
-      const cy = centerNode ? centerNode.pose[1] : 0.0;
+      const cx = centerNode && centerNode.type !== "ground_plane" ? centerNode.pose[0] : 0.0;
+      const cy = centerNode && centerNode.type !== "ground_plane" ? centerNode.pose[1] : 0.0;
       this.sendCommand({
         type: "scatter_brush",
-        archetype,
+        node_id: useSelected ? this.selectedNodeId : "",
+        archetype: useSelected ? "cardboard_box" : archSel,
         center_x: cx,
         center_y: cy,
         radius,
         count,
-        min_clearance: 0.25,
+        min_distance: minDist,
         seed: Math.floor(Math.random() * 100000),
       });
-      this._setStatus(`🎲 Dispersados ${count} objetos (${archetype}) sin solapamientos`);
+      this._setStatus(`🎲 Dispersados ${count} objetos sin solapamientos en radio ${radius} m`);
     });
 
-    // 4. 2D Blueprint Overlay Image & ROS 2 .PGM -> 3D Wall Reconstruction
+    // 4. 2D Blueprint Overlay Image & ROS 2 .PGM -> 3D Wall Reconstruction Popup
     const fpImgInput = document.getElementById("file-floorplan-img");
     document.getElementById("btn-load-floorplan-img")?.addEventListener("click", () => {
       fpImgInput?.click();
@@ -2452,29 +3008,70 @@ class CusteboStudioApp {
     fpImgInput?.addEventListener("change", (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
+      const planeSize = Math.max(2, parseFloat(document.getElementById("floorplan-size-m")?.value || "24"));
       const url = URL.createObjectURL(file);
       new THREE.TextureLoader().load(url, (tex) => {
         if (this.blueprintMesh) {
           this.scene.remove(this.blueprintMesh);
         }
-        const geo = new THREE.PlaneGeometry(30, 30);
+        const geo = new THREE.PlaneGeometry(planeSize, planeSize);
         const mat = new THREE.MeshBasicMaterial({
           map: tex,
           transparent: true,
-          opacity: 0.55,
+          opacity: 0.62,
           depthWrite: false,
         });
         this.blueprintMesh = new THREE.Mesh(geo, mat);
-        this.blueprintMesh.position.set(0, 0, 0.005);
+        this.blueprintMesh.position.set(0, 0, 0.008);
         this.scene.add(this.blueprintMesh);
-        this._setStatus(`🖼 Plano '${file.name}' superpuesto en Z=0 (30×30m). Usa '✏ Trazar Muros' para calcarlo.`);
+        this._setStatus(
+          `🖼 Plano '${file.name}' superpuesto en Z=0 (${planeSize}×${planeSize} m). Pulsa '✏ Trazar Muros 3D' para calcarlo.`
+        );
       });
     });
 
+    document.getElementById("btn-clear-floorplan-img")?.addEventListener("click", () => {
+      if (this.blueprintMesh) {
+        this.scene.remove(this.blueprintMesh);
+        this.blueprintMesh = null;
+        this._setStatus("🗑 Imagen de plano 2D retirada del suelo");
+      }
+    });
+
+    // POPUP 3: PGM SLAM Map -> 3D Walls Assistant
+    const pgmPopup = document.getElementById("popup-pgm-walls");
     const pgmInput = document.getElementById("file-pgm-input");
     document.getElementById("btn-import-pgm-walls")?.addEventListener("click", () => {
+      pgmPopup?.classList.toggle("hidden");
+    });
+    document.getElementById("btn-close-pgm-popup")?.addEventListener("click", () => {
+      pgmPopup?.classList.add("hidden");
+    });
+    document.getElementById("btn-pgm-pick-file")?.addEventListener("click", () => {
       pgmInput?.click();
     });
+    document.getElementById("btn-pgm-demo-map")?.addEventListener("click", async () => {
+      const wh = Math.max(0.5, parseFloat(document.getElementById("pgm-wall-height")?.value || "2.50"));
+      const resVal = Math.max(0.01, parseFloat(document.getElementById("pgm-wall-res")?.value || "0.05"));
+      const res = await fetch("/api/import_pgm_walls", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          use_demo_slam: true,
+          wall_height: wh,
+          resolution: resVal,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        this._applyBackendPayload(data);
+        pgmPopup?.classList.add("hidden");
+        this._setStatus(`🗺 Mapa Demo SLAM reconstruido en ${data.walls_created} muros 3D (altura ${wh.toFixed(2)} m)`);
+      } else {
+        this._setStatus(`Error en Mapa Demo SLAM: ${data.error}`);
+      }
+    });
+
     pgmInput?.addEventListener("change", async (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
@@ -2484,58 +3081,69 @@ class CusteboStudioApp {
       for (let i = 0; i < bytes.byteLength; i++) {
         binary += String.fromCharCode(bytes[i]);
       }
-      const res = await fetch("/api/import_pgm_map", {
+      const wh = Math.max(0.5, parseFloat(document.getElementById("pgm-wall-height")?.value || "2.50"));
+      const resVal = Math.max(0.01, parseFloat(document.getElementById("pgm-wall-res")?.value || "0.05"));
+      const res = await fetch("/api/import_pgm_walls", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           pgm_base64: btoa(binary),
-          resolution: 0.05,
-          wall_height: parseFloat(document.getElementById("fp-wall-height")?.value || "2.6"),
+          resolution: resVal,
+          wall_height: wh,
         }),
       });
       const data = await res.json();
       if (data.ok) {
         this._applyBackendPayload(data);
-        this._setStatus(`🗺 Mapa ROS '${file.name}' reconstruido en ${data.walls_created} muros 3D`);
+        pgmPopup?.classList.add("hidden");
+        this._setStatus(`🗺 Mapa ROS '${file.name}' reconstruido en ${data.walls_created} muros 3D (altura ${wh.toFixed(2)} m)`);
       } else {
         this._setStatus(`Error importando PGM: ${data.error}`);
       }
     });
 
-    // 5. Parametric Outdoor Terrain Generator
+    // 5. Parametric Smooth 3D Outdoor Terrain Generator
     document.getElementById("btn-gen-terrain")?.addEventListener("click", () => {
       const preset = document.getElementById("terrain-preset")?.value || "hills";
-      const size = parseFloat(document.getElementById("terrain-size")?.value || "24");
-      const amp = parseFloat(document.getElementById("terrain-amp")?.value || "1.8");
+      const size = parseFloat(document.getElementById("terrain-size")?.value || "18");
+      const amp = parseFloat(document.getElementById("terrain-amp")?.value || "1.5");
       this.sendCommand({
         type: "generate_terrain",
         preset,
         width: size,
         depth: size,
         amplitude: amp,
+        grid_res: 24,
       });
-      this._setStatus(`⛰ Terreno '${preset}' (${size}×${size} m) generado e inyectado en escena`);
+      this._setStatus(`⛰ Malla de terreno 3D suave '${preset}' (${size}×${size} m, Zmax=${amp} m) generada`);
     });
 
-    // 6. Multi-Object Alignment & Equidistant Distribution
-    const triggerDistribute = (axis) => {
+    // 6. Multi-Object Alignment & Equidistant Distribution (X / Y)
+    const triggerCadAlignOrDistribute = (mode) => {
       if (!this.sceneGraph) return;
       const movableIds = this.sceneGraph.nodes
-        .filter((n) => n.type !== "ground_plane" && n.type !== "light" && !n.locked)
+        .filter((n) => n.type !== "ground_plane" && n.type !== "light" && !n.locked && n.visible !== false)
         .map((n) => n.id);
       if (movableIds.length < 2) {
-        this._setStatus("⚠ Se necesitan al menos 2 objetos en la escena para distribuir");
+        this._setStatus("⚠ Se necesitan al menos 2 objetos visibles y desbloqueados en la escena");
         return;
       }
       this.sendCommand({
         type: "align_distribute",
         node_ids: movableIds,
-        mode: `distribute_${axis}`,
+        mode,
+        spacing: 2.0,
       });
-      this._setStatus(`📐 Objetos distribuidos equidistantemente en el eje ${axis.toUpperCase()}`);
+      this._setStatus(`📐 Operación CAD '${mode.toUpperCase()}' aplicada sobre ${movableIds.length} objetos`);
     };
-    document.getElementById("btn-distribute-x")?.addEventListener("click", () => triggerDistribute("x"));
-    document.getElementById("btn-distribute-y")?.addEventListener("click", () => triggerDistribute("y"));
+    document.getElementById("btn-align-x")?.addEventListener("click", () => triggerCadAlignOrDistribute("align_x"));
+    document.getElementById("btn-align-y")?.addEventListener("click", () => triggerCadAlignOrDistribute("align_y"));
+    document
+      .getElementById("btn-distribute-x")
+      ?.addEventListener("click", () => triggerCadAlignOrDistribute("distribute_x"));
+    document
+      .getElementById("btn-distribute-y")
+      ?.addEventListener("click", () => triggerCadAlignOrDistribute("distribute_y"));
 
     // =========================================================================
     // Phase 4: ROS 2, Nav2, Sensors, Dynamic Actors & Parametric XACRO
@@ -2625,14 +3233,8 @@ class CusteboStudioApp {
       ?.addEventListener("click", () => generateAndRenderNav2Map(true));
 
     // 4.2 Nav2 Waypoints & Topological Route Graph
-    document.getElementById("btn-tool-waypoint")?.addEventListener("click", (e) => {
-      this.activeViewportTool = this.activeViewportTool === "waypoint" ? null : "waypoint";
-      e.currentTarget.classList.toggle("active", this.activeViewportTool === "waypoint");
-      if (this.activeViewportTool === "waypoint") {
-        this._setStatus("📍 Modo Waypoint Nav2: haz clic en cualquier punto del suelo 3D para trazar la ruta.");
-      } else {
-        this._setStatus("Modo Waypoint Nav2 desactivado");
-      }
+    document.getElementById("btn-tool-waypoint")?.addEventListener("click", () => {
+      setViewportTool("waypoint");
     });
 
     document.getElementById("btn-add-waypoint")?.addEventListener("click", () => {
@@ -2814,22 +3416,12 @@ class CusteboStudioApp {
           setViewportTool("ruler");
           break;
         case "enter":
-          if (this.activeViewportTool === "floorplan" && (this.floorplanPoints || []).length >= 2) {
+          if (this.activeViewportTool === "floorplan") {
             e.preventDefault();
-            const pts = [...this.floorplanPoints];
-            const h = parseFloat(document.getElementById("fp-wall-height")?.value || "2.6");
-            const t = parseFloat(document.getElementById("fp-wall-thick")?.value || "0.20");
-            this.sendCommand({
-              type: "extrude_floorplan",
-              points: pts,
-              height: h,
-              thickness: t,
-              closed: false,
-            });
-            this.floorplanPoints = [];
-            this.activeViewportTool = null;
-            document.getElementById("btn-tool-floorplan")?.classList.remove("active");
-            this._setStatus(`🧱 Extruidos ${pts.length - 1} muros 3D desde el trazado 2D`);
+            this._commitFloorplanWalls();
+          } else if (this.activeViewportTool === "spline") {
+            e.preventDefault();
+            this._commitSplineClones();
           }
           break;
         case "escape":

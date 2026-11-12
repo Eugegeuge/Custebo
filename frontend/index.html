@@ -164,59 +164,93 @@
           <!-- HERRAMIENTAS CAD Y GENERACIÓN PROCEDURAL (FASE 3) -->
           <div class="palette-cat-title custom-cat-header">
             <span>⚡ Generación Procedural y CAD</span>
-            <button id="btn-toggle-procedural" class="mini-btn">Abrir</button>
+            <button id="btn-toggle-procedural" class="mini-btn">Abrir/Cerrar</button>
           </div>
-          <div id="procedural-drawer" class="import-drawer hidden">
+          <div id="procedural-drawer" class="import-drawer">
             <!-- 1. Grid Array Cloner -->
-            <div style="font-weight:700;color:#79b8ff;font-size:11px;">🔢 Matriz Lineal / Cuadrícula (del seleccionado)</div>
+            <div style="font-weight:700;color:#79b8ff;font-size:11px;">🔢 1. Matriz 3D (Clonar objeto seleccionado)</div>
             <div class="vec3-grid">
-              <div class="vec-field"><span class="vec-axis x">Nx</span><input id="arr-nx" type="number" min="1" max="15" value="3" /></div>
-              <div class="vec-field"><span class="vec-axis y">Ny</span><input id="arr-ny" type="number" min="1" max="15" value="2" /></div>
-              <div class="vec-field"><span class="vec-axis z">Δm</span><input id="arr-step" type="number" step="0.5" min="0.2" value="2.5" /></div>
+              <div class="vec-field"><span class="vec-axis x">Nx</span><input id="arr-nx" type="number" min="1" max="15" value="3" title="Copias en X" /></div>
+              <div class="vec-field"><span class="vec-axis y">Ny</span><input id="arr-ny" type="number" min="1" max="15" value="2" title="Copias en Y" /></div>
+              <div class="vec-field"><span class="vec-axis z">Nz</span><input id="arr-nz" type="number" min="1" max="10" value="1" title="Pisos en Z" /></div>
             </div>
-            <button id="btn-run-grid-array" class="tool-btn" style="width:100%;">🔢 Generar Matriz Nx × Ny</button>
+            <div class="vec3-grid">
+              <div class="vec-field"><span class="vec-axis x">ΔX</span><input id="arr-sx" type="number" step="0.5" min="0.2" value="2.5" title="Espaciado X (m)" /></div>
+              <div class="vec-field"><span class="vec-axis y">ΔY</span><input id="arr-sy" type="number" step="0.5" min="0.2" value="2.5" title="Espaciado Y (m)" /></div>
+              <div class="vec-field"><span class="vec-axis z">ΔZ</span><input id="arr-sz" type="number" step="0.5" min="0.2" value="2.2" title="Espaciado Z (m)" /></div>
+            </div>
+            <button id="btn-run-grid-array" class="btn-primary" style="width:100%;font-size:11.5px;">🔢 Generar Matriz Nx × Ny × Nz</button>
 
             <!-- 2. Spline / Path Cloner -->
-            <div style="font-weight:700;color:#79b8ff;font-size:11px;margin-top:4px;">〰 Clonador en Curva Bézier</div>
-            <div class="insp-row">
-              <span class="insp-label">Copias en curva:</span>
-              <input id="spline-count" class="insp-input" type="number" min="2" max="40" value="7" style="width:70px;" />
-              <button id="btn-run-spline" class="tool-btn">〰 Clonar</button>
+            <div style="font-weight:700;color:#79b8ff;font-size:11px;margin-top:6px;">〰 2. Clonador en Curva Bézier</div>
+            <div class="vec3-grid">
+              <div class="vec-field"><span class="vec-axis x">N</span><input id="spline-count" type="number" min="2" max="40" value="7" title="Número de copias en la curva" /></div>
+              <div class="vec-field"><span class="vec-axis y">R(m)</span><input id="spline-radius" type="number" step="1" min="2" value="8" title="Longitud / Radio de la curva (m)" /></div>
+              <div class="vec-field"><span class="vec-axis z">Tan</span><input id="spline-tangent" type="checkbox" checked style="margin:auto;" title="Alinear rotación con la tangente de la curva" /></div>
+            </div>
+            <div class="create-grid" style="margin-bottom:2px;">
+              <button id="btn-trace-spline-3d" class="tool-btn" title="Haz clic en el suelo 3D para dibujar los puntos de la curva Bézier">✏ Trazar Curva 3D</button>
+              <button id="btn-run-spline" class="tool-btn" title="Clonar inmediatamente formando una curva suave en S">⚡ Clonar en Curva</button>
             </div>
 
             <!-- 3. Scatter Brush (Domain Randomization) -->
-            <div style="font-weight:700;color:#79b8ff;font-size:11px;margin-top:4px;">🎨 Pincel de Dispersión (Scatter)</div>
-            <div class="vec3-grid">
-              <div class="vec-field"><span class="vec-axis x">N</span><input id="scat-count" type="number" min="1" max="50" value="10" title="Cantidad de objetos" /></div>
-              <div class="vec-field"><span class="vec-axis y">R</span><input id="scat-radius" type="number" step="1" min="1" value="6" title="Radio de dispersión (m)" /></div>
-              <div class="vec-field"><span class="vec-axis z">d</span><input id="scat-mindist" type="number" step="0.2" min="0.2" value="1.0" title="Distancia mínima anti-solapamiento (m)" /></div>
+            <div style="font-weight:700;color:#79b8ff;font-size:11px;margin-top:6px;">🎨 3. Pincel de Dispersión (Scatter Anti-Solape)</div>
+            <div class="insp-row">
+              <span class="insp-label">Objeto:</span>
+              <select id="scatter-arch" class="insp-select">
+                <option value="__selected__">🎯 Objeto Seleccionado</option>
+                <option value="cardboard_box" selected>📦 Caja de Cartón</option>
+                <option value="traffic_cone">🔺 Cono de Tráfico</option>
+                <option value="euro_pallet">🪵 Palé Europeo</option>
+                <option value="bollard">🛑 Bolardo</option>
+                <option value="safety_fence">🚧 Valla Seguridad</option>
+              </select>
             </div>
-            <button id="btn-run-scatter" class="tool-btn" style="width:100%;">🎨 Dispersar Aleatoriamente</button>
+            <div class="vec3-grid">
+              <div class="vec-field"><span class="vec-axis x">N</span><input id="scatter-count" type="number" min="1" max="60" value="10" title="Cantidad de objetos" /></div>
+              <div class="vec-field"><span class="vec-axis y">R(m)</span><input id="scatter-radius" type="number" step="1" min="1" value="6" title="Radio del círculo de dispersión (m)" /></div>
+              <div class="vec-field"><span class="vec-axis z">d(m)</span><input id="scatter-mindist" type="number" step="0.1" min="0.2" value="0.9" title="Separación mínima anti-colisión (m)" /></div>
+            </div>
+            <div class="create-grid" style="margin-bottom:2px;">
+              <button id="btn-paint-scatter-3d" class="tool-btn" title="Muestra un círculo guía 3D en el suelo y dispersa objetos donde hagas clic">🎯 Pintar en Suelo</button>
+              <button id="btn-run-scatter" class="tool-btn" title="Dispersar aleatoriamente alrededor del centro o del objeto seleccionado">🎲 Dispersar Ya</button>
+            </div>
 
             <!-- 4. Floorplan 2D Image & ROS PGM Map to 3D Walls -->
-            <div style="font-weight:700;color:#79b8ff;font-size:11px;margin-top:4px;">🗺 Plano 2D y Mapa SLAM (.PGM → Muros 3D)</div>
-            <div class="insp-row">
-              <span class="insp-label">Ancho Plano (m):</span>
-              <input id="floorplan-size-m" class="insp-input" type="number" step="1" min="2" value="20" style="width:70px;" />
-              <button id="btn-load-floorplan-img" class="tool-btn" title="Cargar imagen .png/.jpg de plano en el suelo Z=0">🖼 Plano 2D</button>
-              <input id="file-floorplan-input" type="file" accept="image/*" style="display:none" />
+            <div style="font-weight:700;color:#79b8ff;font-size:11px;margin-top:6px;">🧱 4. Levantar Muros 3D y Planos 2D</div>
+            <div class="create-grid" style="margin-bottom:4px;">
+              <button id="btn-open-wall-tracer-drawer" class="btn-primary" style="font-size:11px;" title="Abrir el trazador interactivo de muros 3D haciendo clic en el suelo">✏ Trazar Muros 3D</button>
+              <button id="btn-import-pgm-walls" class="tool-btn" style="font-size:11px;" title="Abrir asistente para levantar muros 3D desde un mapa SLAM .PGM">🗺 Muros desde .PGM</button>
             </div>
-            <button id="btn-import-pgm-walls" class="tool-btn" style="width:100%;" title="Importar un mapa map.pgm de ROS y levantar muros 3D automáticamente">🧱 Levantar Muros desde .PGM</button>
             <input id="file-pgm-input" type="file" accept=".pgm" style="display:none" />
+            <div class="insp-row">
+              <span class="insp-label">Plano 2D (m):</span>
+              <input id="floorplan-size-m" class="insp-input" type="number" step="1" min="2" value="24" style="width:55px;" />
+              <button id="btn-load-floorplan-img" class="tool-btn" title="Superponer imagen .png/.jpg de plano arquitectónico en Z=0">🖼 Subir Plano</button>
+              <button id="btn-clear-floorplan-img" class="icon-btn danger" title="Quitar imagen de plano del suelo">🗑</button>
+              <input id="file-floorplan-img" type="file" accept="image/*" style="display:none" />
+            </div>
 
             <!-- 5. Parametric Terrain & CAD Alignment -->
-            <div style="font-weight:700;color:#79b8ff;font-size:11px;margin-top:4px;">⛰ Terreno Heightmap y Alineación CAD</div>
+            <div style="font-weight:700;color:#79b8ff;font-size:11px;margin-top:6px;">⛰ 5. Terreno 3D Suave y Alineación CAD</div>
             <div class="insp-row">
-              <select id="terrain-profile-select" class="insp-select">
-                <option value="hills">Colinas Suaves</option>
-                <option value="crater">Cráter / Obstáculo</option>
-                <option value="ridge">Cresta Central</option>
+              <select id="terrain-preset" class="insp-select">
+                <option value="hills">⛰ Colinas Suaves (Malla 3D)</option>
+                <option value="crater">🌑 Cráter Lunar / Obstáculo</option>
+                <option value="ridge">🏔 Cresta Montañosa</option>
+                <option value="valley">🏞 Valle / Cañón</option>
               </select>
-              <button id="btn-gen-terrain" class="tool-btn">⛰ Crear</button>
             </div>
-            <div class="create-grid" style="margin-bottom:0;">
-              <button id="btn-distribute-x" class="tool-btn" title="Distribuir objetos uniformemente en X">↔ Distribuir X</button>
-              <button id="btn-distribute-y" class="tool-btn" title="Distribuir objetos uniformemente en Y">↕ Distribuir Y</button>
+            <div class="vec3-grid">
+              <div class="vec-field"><span class="vec-axis x">XY</span><input id="terrain-size" type="number" step="2" min="4" value="18" title="Tamaño XY del terreno (m)" /></div>
+              <div class="vec-field"><span class="vec-axis z">Zmax</span><input id="terrain-amp" type="number" step="0.2" min="0.2" value="1.5" title="Altura máxima del relieve (m)" /></div>
+              <button id="btn-gen-terrain" class="btn-primary" style="font-size:11px;">⛰ Crear</button>
+            </div>
+            <div class="create-grid" style="margin-bottom:0;margin-top:4px;">
+              <button id="btn-align-x" class="tool-btn" title="Alinear objetos en la misma coordenada X">📏 Alin. X</button>
+              <button id="btn-align-y" class="tool-btn" title="Alinear objetos en la misma coordenada Y">📏 Alin. Y</button>
+              <button id="btn-distribute-x" class="tool-btn" title="Distribuir objetos equidistantemente en X">↔ Distribuir X</button>
+              <button id="btn-distribute-y" class="tool-btn" title="Distribuir objetos equidistantemente en Y">↕ Distribuir Y</button>
             </div>
           </div>
 
@@ -314,6 +348,107 @@
       <div class="viewport-hud-top">
         <span class="enu-pill">ROS 2 ENU: <b>+X</b> Front (Rojo) · <b>+Y</b> Left (Verde) · <b>+Z</b> Up (Azul)</span>
         <span id="hud-selection-info" class="selection-pill">Ningún objeto seleccionado</span>
+      </div>
+
+      <!-- FLOATING POPUP 1: INTERACTIVE 2D->3D WALL TRACER -->
+      <div id="popup-wall-tracer" class="viewport-popup hidden">
+        <div class="viewport-popup-header">
+          <span>🧱 Levantar Muros 3D (Trazador)</span>
+          <button id="btn-close-wall-popup" class="popup-close-btn" title="Cerrar (Esc)">×</button>
+        </div>
+        <div class="popup-hint-box">
+          Haz clic en el suelo 3D para marcar las esquinas por donde levantar los muros. Verás la guía 3D en tiempo real.
+        </div>
+        <div class="insp-row">
+          <span class="insp-label">Altura de Muros (m):</span>
+          <input id="fp-wall-height" class="insp-input" type="number" step="0.1" min="0.3" value="2.50" style="width:90px;" />
+        </div>
+        <div class="insp-row">
+          <span class="insp-label">Grosor de Muros (m):</span>
+          <input id="fp-wall-thick" class="insp-input" type="number" step="0.05" min="0.05" value="0.20" style="width:90px;" />
+        </div>
+        <div class="insp-row">
+          <span class="insp-label">Tipo de Tramo:</span>
+          <select id="fp-wall-type" class="insp-select">
+            <option value="wall">🧱 Muro Sólido</option>
+            <option value="wall_doorway">🚪 Muro con Puerta</option>
+            <option value="wall_window">🪟 Muro con Ventana</option>
+          </select>
+        </div>
+        <div class="insp-row">
+          <span class="insp-label">🔗 Cerrar Habitación / Bucle</span>
+          <input id="fp-wall-closed" type="checkbox" />
+        </div>
+        <div id="fp-live-stats" class="ruler-readout-big" style="padding:6px;">
+          <span id="fp-vertex-count" style="color:#38bdf8;font-weight:700;">0 puntos marcados</span>
+          <div id="fp-segment-info" class="ruler-sub-vals">Mueve el cursor por el suelo para previsualizar</div>
+        </div>
+        <div class="popup-actions">
+          <button id="btn-fp-build-now" class="btn-primary">🧱 Levantar Muros (Enter)</button>
+          <button id="btn-fp-undo-pt" class="tool-btn" style="flex:0.45;" title="Borrar último vértice">↩</button>
+        </div>
+        <button id="btn-fp-quick-room" class="tool-btn" style="width:100%;text-align:center;" title="Generar automáticamente un recinto de 4 paredes con la altura y grosor indicados">⚡ Crear Recinto Rápido (8×6 m)</button>
+      </div>
+
+      <!-- FLOATING POPUP 2: 3D LASER RULER & PROTRACTOR -->
+      <div id="popup-ruler" class="viewport-popup hidden">
+        <div class="viewport-popup-header">
+          <span>📏 Medidor Láser 3D (Regla y Ángulo)</span>
+          <button id="btn-close-ruler-popup" class="popup-close-btn" title="Cerrar (Esc)">×</button>
+        </div>
+        <div class="popup-hint-box">
+          Haz clic en el <b>Punto 1</b> (verde) y luego en el <b>Punto 2</b> (rojo) sobre el suelo o sobre objetos 3D.
+        </div>
+        <div class="ruler-readout-big">
+          <span id="ruler-dist-main" class="ruler-dist-val">0.000 m</span>
+          <div id="ruler-deltas" class="ruler-sub-vals">ΔX: 0.00 m · ΔY: 0.00 m · ΔZ: 0.00 m</div>
+          <div id="ruler-angles" class="ruler-sub-vals" style="color:#38bdf8;">Yaw ENU: 0.0° (0.000 rad)</div>
+        </div>
+        <div class="popup-actions">
+          <button id="btn-ruler-reset" class="tool-btn">🔄 Nueva Medida</button>
+          <button id="btn-ruler-done" class="btn-primary">✓ Listo</button>
+        </div>
+      </div>
+
+      <!-- FLOATING POPUP 3: PGM SLAM MAP -> 3D WALLS ASSISTANT -->
+      <div id="popup-pgm-walls" class="viewport-popup hidden">
+        <div class="viewport-popup-header">
+          <span>🗺 Levantar Muros 3D desde Mapa .PGM</span>
+          <button id="btn-close-pgm-popup" class="popup-close-btn" title="Cerrar">×</button>
+        </div>
+        <div class="popup-hint-box">
+          Convierte los píxeles negros de ocupación de un mapa SLAM (<code>.pgm</code>) en muros 3D estáticos en tu mundo.
+        </div>
+        <div class="insp-row">
+          <span class="insp-label">Altura de Muros (m):</span>
+          <input id="pgm-wall-height" class="insp-input" type="number" step="0.1" min="0.5" value="2.50" style="width:90px;" />
+        </div>
+        <div class="insp-row">
+          <span class="insp-label">Resolución (m/px):</span>
+          <input id="pgm-wall-res" class="insp-input" type="number" step="0.01" min="0.01" value="0.05" style="width:90px;" />
+        </div>
+        <div class="popup-actions">
+          <button id="btn-pgm-pick-file" class="btn-primary">📂 Elegir Archivo .PGM</button>
+          <button id="btn-pgm-demo-map" class="tool-btn">⚡ Mapa Demo SLAM</button>
+        </div>
+      </div>
+
+      <!-- FLOATING POPUP 4: INTERACTIVE 3D SPLINE / CURVE TRACER -->
+      <div id="popup-spline-tracer" class="viewport-popup hidden">
+        <div class="viewport-popup-header">
+          <span>〰 Trazador de Curva Bézier 3D</span>
+          <button id="btn-close-spline-popup" class="popup-close-btn" title="Cerrar">×</button>
+        </div>
+        <div class="popup-hint-box">
+          Haz clic en 2 o más puntos del suelo para dibujar la curva por donde se clonará el objeto seleccionado.
+        </div>
+        <div id="spline-live-info" class="ruler-readout-big" style="padding:6px;">
+          <span style="color:#fde047;font-weight:700;">0 puntos en la curva</span>
+        </div>
+        <div class="popup-actions">
+          <button id="btn-spline-build-now" class="btn-primary">〰 Clonar en Curva (Enter)</button>
+          <button id="btn-spline-clear-pts" class="tool-btn" style="flex:0.45;">🔄</button>
+        </div>
       </div>
 
       <div class="viewport-hud-bottom">

@@ -7,3 +7,4 @@ Implements Phase 4 capabilities:
   - Robot Spawn Markers, Static Sensors (LiDAR / RGB-D) & `ros_gz_bridge.yaml` Generator
   - Dynamic Pedestrian / Obstacle `<actor>` Trajectories
 """
+

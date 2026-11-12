@@ -1,1 +1,176 @@
-[]
+[
+  {
+    "id": "custom_agv_chassis",
+    "label": "🦾 Chasis Robot AGV (.STL)",
+    "kind": "cad_mesh",
+    "filename": "agv_chassis.stl",
+    "unit": "m",
+    "up_axis": "Z_UP",
+    "material_preset": "aluminum",
+    "color": [
+      0.22,
+      0.58,
+      0.92,
+      1.0
+    ],
+    "analysis": {
+      "triangle_count": 24,
+      "vertex_count": 72,
+      "aabb_min": [
+        -0.45,
+        -0.325,
+        -0.15
+      ],
+      "aabb_max": [
+        0.45,
+        0.325,
+        0.23
+      ],
+      "bounding_size": [
+        0.9,
+        0.65,
+        0.38
+      ],
+      "bounding_radius": 0.55509,
+      "bounding_length": 0.38,
+      "volume_m3": 0.141244,
+      "center_of_mass": [
+        0.0,
+        0.0,
+        -0.02313
+      ],
+      "unit_scale": 1.0,
+      "up_axis": "Z_UP",
+      "inertial": {
+        "mass": 600.21,
+        "ixx": 28.354921,
+        "iyy": 47.736702,
+        "izz": 61.646569,
+        "ixy": 0.0,
+        "ixz": 0.0,
+        "iyz": 0.0
+      }
+    },
+    "proxies": {
+      "decimated_uri": "meshes/agv_chassis_col_decimated.stl",
+      "convex_hull_uri": "meshes/agv_chassis_col_hull.stl",
+      "decimated_triangles": "24"
+    }
+  },
+  {
+    "id": "custom_flange_mm",
+    "label": "⚙ Brida CAD 600mm (.STL mm→m)",
+    "kind": "cad_mesh",
+    "filename": "cad_flange_mm.stl",
+    "unit": "mm",
+    "up_axis": "Z_UP",
+    "material_preset": "steel",
+    "color": [
+      0.72,
+      0.76,
+      0.82,
+      1.0
+    ],
+    "analysis": {
+      "triangle_count": 192,
+      "vertex_count": 576,
+      "aabb_min": [
+        -0.3,
+        -0.3,
+        -0.2
+      ],
+      "aabb_max": [
+        0.3,
+        0.3,
+        0.2
+      ],
+      "bounding_size": [
+        0.6,
+        0.6,
+        0.4
+      ],
+      "bounding_radius": 0.42426,
+      "bounding_length": 0.4,
+      "volume_m3": 0.112775,
+      "center_of_mass": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unit_scale": 0.001,
+      "up_axis": "Z_UP",
+      "inertial": {
+        "mass": 1130.4,
+        "ixx": 48.984,
+        "iyy": 48.984,
+        "izz": 67.824,
+        "ixy": 0.0,
+        "ixz": 0.0,
+        "iyz": 0.0
+      }
+    },
+    "proxies": {
+      "decimated_uri": "meshes/cad_flange_mm_col_decimated.stl",
+      "convex_hull_uri": "meshes/cad_flange_mm_col_hull.stl",
+      "decimated_triangles": "64"
+    }
+  },
+  {
+    "id": "custom_conveyor",
+    "label": "🛤 Módulo Transportador (.OBJ)",
+    "kind": "cad_mesh",
+    "filename": "conveyor_module.obj",
+    "unit": "m",
+    "up_axis": "Z_UP",
+    "material_preset": "steel",
+    "color": [
+      0.18,
+      0.72,
+      0.54,
+      1.0
+    ],
+    "analysis": {
+      "triangle_count": 12,
+      "vertex_count": 36,
+      "aabb_min": [
+        -0.75,
+        -0.4,
+        -0.35
+      ],
+      "aabb_max": [
+        0.75,
+        0.4,
+        0.35
+      ],
+      "bounding_size": [
+        1.5,
+        0.8,
+        0.7
+      ],
+      "bounding_radius": 0.85,
+      "bounding_length": 0.7,
+      "volume_m3": 0.84,
+      "center_of_mass": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "unit_scale": 1.0,
+      "up_axis": "Z_UP",
+      "inertial": {
+        "mass": 6594.0,
+        "ixx": 620.935,
+        "iyy": 1505.63,
+        "izz": 1588.055,
+        "ixy": 0.0,
+        "ixz": 0.0,
+        "iyz": 0.0
+      }
+    },
+    "proxies": {
+      "decimated_uri": "meshes/conveyor_module_col_decimated.stl",
+      "convex_hull_uri": "meshes/conveyor_module_col_hull.stl",
+      "decimated_triangles": "12"
+    }
+  }
+]

@@ -316,3 +316,4 @@ def generate_ros_gz_bridge_yaml(doc: SceneGraphDocument) -> str:
             )
 
     return "\n".join(lines) + "\n"
+

@@ -98,3 +98,4 @@ def compile_scene_to_xacro(doc: SceneGraphDocument, target: str = "harmonic") ->
     out.append("  </world>")
     out.append("</sdf>")
     return "\n".join(out) + "\n"
+
