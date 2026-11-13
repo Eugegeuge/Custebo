@@ -403,6 +403,18 @@ class SDFCompiler:
             emit(f"{indent}<sphere>")
             emit(f"{indent}  <radius>{format_number(radius, 6)}</radius>")
             emit(f"{indent}</sphere>")
+        elif shape == "mesh":
+            uri = xml_escape(str(part.get("mesh_uri") or f"meshes/{part.get('mesh_filename', 'mesh.stl')}"))
+            mscale = part.get("mesh_scale", [1.0, 1.0, 1.0])
+            scaled_mscale = [
+                max(abs(float(mscale[0]) * sx), 1e-5),
+                max(abs(float(mscale[1]) * sy), 1e-5),
+                max(abs(float(mscale[2]) * sz), 1e-5),
+            ]
+            emit(f"{indent}<mesh>")
+            emit(f"{indent}  <uri>{uri}</uri>")
+            emit(f"{indent}  <scale>{format_vec(scaled_mscale, 6)}</scale>")
+            emit(f"{indent}</mesh>")
 
     @staticmethod
     def _emit_model_node(node: Dict[str, Any], emit) -> None:

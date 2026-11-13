@@ -15,6 +15,7 @@ from core.commands.node_commands import (
     DropToGroundCommand,
     UpdateWorldSettingsCommand,
     ExplodeCompositeCommand,
+    SwapNodesOrderCommand,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "DropToGroundCommand",
     "UpdateWorldSettingsCommand",
     "ExplodeCompositeCommand",
+    "SwapNodesOrderCommand",
 ]

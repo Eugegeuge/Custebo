@@ -34,16 +34,22 @@ body {
   user-select: none;
 }
 
+.hidden {
+  display: none !important;
+}
+
 /* ==================== TOPBAR ==================== */
 .topbar {
-  height: 46px;
+  min-height: 46px;
+  height: auto;
   background-color: var(--bg-panel);
   border-bottom: 1px solid var(--border-color);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  padding: 0 10px;
-  gap: 8px;
+  padding: 5px 10px;
+  gap: 6px 10px;
   flex-shrink: 0;
 }
 
@@ -51,6 +57,7 @@ body {
 .tool-group,
 .action-group {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 5px;
 }
@@ -211,12 +218,46 @@ body {
 
 .left-sidebar {
   width: 265px;
+  min-width: 190px;
+  max-width: 55vw;
   border-right: 1px solid var(--border-color);
 }
 
 .right-sidebar {
   width: 320px;
+  min-width: 220px;
+  max-width: 55vw;
   border-left: 1px solid var(--border-color);
+}
+
+.resizer-v {
+  width: 5px;
+  cursor: col-resize;
+  background: #14181d;
+  border-left: 1px solid var(--border-color);
+  border-right: 1px solid var(--border-color);
+  flex-shrink: 0;
+  transition: background-color 0.15s;
+}
+
+.resizer-v:hover,
+.resizer-v.active {
+  background-color: var(--accent-blue);
+}
+
+.resizer-h {
+  height: 5px;
+  cursor: row-resize;
+  background: #14181d;
+  border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+  transition: background-color 0.15s;
+}
+
+.resizer-h:hover,
+.resizer-h.active {
+  background-color: var(--accent-blue);
 }
 
 .panel-section {
@@ -227,12 +268,14 @@ body {
 
 .outliner-section {
   flex: 1;
-  min-height: 180px;
+  min-height: 90px;
   overflow: hidden;
 }
 
 .doctor-section {
-  max-height: 165px;
+  height: 120px;
+  min-height: 60px;
+  flex-shrink: 0;
   overflow: hidden;
 }
 
@@ -253,7 +296,9 @@ body {
 
 /* ==================== CREATE PALETTE ==================== */
 .palette-section {
-  max-height: 52%;
+  height: 48%;
+  min-height: 90px;
+  flex-shrink: 0;
   overflow: hidden;
 }
 
@@ -570,6 +615,8 @@ body {
 /* ==================== LIVE SDF XML SPLIT-VIEW ==================== */
 .xml-split-panel {
   width: 390px;
+  min-width: 180px;
+  max-width: 60vw;
   background: #101419;
   border-left: 1px solid var(--border-color);
   display: flex;

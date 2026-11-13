@@ -251,7 +251,124 @@ class CusteboStudioApp {
     this.scene.add(this.toolOverlayGroup);
 
     window.addEventListener("resize", () => this._onResize());
+    if (typeof ResizeObserver !== "undefined" && this.mountEl) {
+      this._resizeObserver = new ResizeObserver(() => this._onResize());
+      this._resizeObserver.observe(this.mountEl);
+    }
+    this._initPanelResizers();
     this._animate();
+  }
+
+  _initPanelResizers() {
+    const STORAGE_KEY = "custebo_layout_v1";
+    let saved = {};
+    try {
+      saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    } catch {
+      saved = {};
+    }
+    const saveLayout = () => {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+      } catch {
+        // Ignore storage quota errors
+      }
+    };
+
+    const leftSb = document.getElementById("left-sidebar");
+    const rightSb = document.getElementById("right-sidebar");
+    const xmlPanel = document.getElementById("xml-split-panel");
+    const paletteSec = document.getElementById("palette-section");
+    const doctorSec = document.getElementById("doctor-section");
+
+    if (leftSb && saved.leftWidth) leftSb.style.width = `${saved.leftWidth}px`;
+    if (rightSb && saved.rightWidth) rightSb.style.width = `${saved.rightWidth}px`;
+    if (xmlPanel && saved.xmlWidth) xmlPanel.style.width = `${saved.xmlWidth}px`;
+    if (paletteSec && saved.paletteHeight) paletteSec.style.height = `${saved.paletteHeight}px`;
+    if (doctorSec && saved.doctorHeight) doctorSec.style.height = `${saved.doctorHeight}px`;
+
+    const bindDrag = (handleId, onMove) => {
+      const handle = document.getElementById(handleId);
+      if (!handle) return;
+      handle.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        handle.classList.add("active");
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const ctx = onMove.start ? onMove.start() : {};
+        document.body.style.cursor = handle.classList.contains("resizer-v") ? "col-resize" : "row-resize";
+
+        const handleMove = (ev) => {
+          onMove.drag(ev.clientX - startX, ev.clientY - startY, ctx);
+          this._onResize();
+        };
+        const handleUp = () => {
+          handle.classList.remove("active");
+          document.body.style.cursor = "";
+          window.removeEventListener("pointermove", handleMove);
+          window.removeEventListener("pointerup", handleUp);
+          saveLayout();
+        };
+        window.addEventListener("pointermove", handleMove);
+        window.addEventListener("pointerup", handleUp);
+      });
+    };
+
+    bindDrag("resizer-left", {
+      start: () => ({ w: leftSb ? leftSb.getBoundingClientRect().width : 265 }),
+      drag: (dx, _dy, ctx) => {
+        if (!leftSb) return;
+        const next = Math.max(190, Math.min(window.innerWidth * 0.55, Math.round(ctx.w + dx)));
+        leftSb.style.width = `${next}px`;
+        saved.leftWidth = next;
+      },
+    });
+
+    bindDrag("resizer-xml", {
+      start: () => ({ w: xmlPanel ? xmlPanel.getBoundingClientRect().width : 390 }),
+      drag: (dx, _dy, ctx) => {
+        if (!xmlPanel) return;
+        const next = Math.max(180, Math.min(window.innerWidth * 0.6, Math.round(ctx.w - dx)));
+        xmlPanel.style.width = `${next}px`;
+        saved.xmlWidth = next;
+      },
+    });
+
+    bindDrag("resizer-right", {
+      start: () => ({ w: rightSb ? rightSb.getBoundingClientRect().width : 320 }),
+      drag: (dx, _dy, ctx) => {
+        if (!rightSb) return;
+        const next = Math.max(220, Math.min(window.innerWidth * 0.55, Math.round(ctx.w - dx)));
+        rightSb.style.width = `${next}px`;
+        saved.rightWidth = next;
+      },
+    });
+
+    bindDrag("resizer-left-top", {
+      start: () => ({
+        h: paletteSec ? paletteSec.getBoundingClientRect().height : 300,
+        maxH: leftSb ? leftSb.getBoundingClientRect().height - 170 : 500,
+      }),
+      drag: (_dx, dy, ctx) => {
+        if (!paletteSec) return;
+        const next = Math.max(90, Math.min(Math.max(150, ctx.maxH), Math.round(ctx.h + dy)));
+        paletteSec.style.height = `${next}px`;
+        saved.paletteHeight = next;
+      },
+    });
+
+    bindDrag("resizer-left-bottom", {
+      start: () => ({
+        h: doctorSec ? doctorSec.getBoundingClientRect().height : 120,
+        maxH: leftSb ? leftSb.getBoundingClientRect().height - 180 : 400,
+      }),
+      drag: (_dx, dy, ctx) => {
+        if (!doctorSec) return;
+        const next = Math.max(60, Math.min(Math.max(120, ctx.maxH), Math.round(ctx.h - dy)));
+        doctorSec.style.height = `${next}px`;
+        saved.doctorHeight = next;
+      },
+    });
   }
 
   _buildEnuGridAndAxes() {
@@ -394,10 +511,23 @@ class CusteboStudioApp {
       this.selectedNodeIds.add(this.selectedNodeId);
     }
 
-    // Update topbar controls
+    // Update topbar & world physics/plugin controls
     document.getElementById("world-name-input").value = this.sceneGraph.world.name || "custebo_world";
     document.getElementById("sdf-target-select").value =
       this.sceneGraph.world.sdf_target || "harmonic";
+    const physSelect = document.getElementById("world-physics-engine");
+    if (physSelect) {
+      physSelect.value = this.sceneGraph.world?.physics?.engine || "dart";
+    }
+    const worldPlugins = this.sceneGraph.world?.plugins || {};
+    document.querySelectorAll(".world-plugin-chk").forEach((chk) => {
+      const pKey = chk.getAttribute("data-plugin");
+      if (pKey && pKey in worldPlugins) {
+        chk.checked = Boolean(worldPlugins[pKey]);
+      } else if (pKey) {
+        chk.checked = ["physics", "user_commands", "scene_broadcaster", "sensors"].includes(pKey);
+      }
+    });
 
     const btnUndo = document.getElementById("btn-undo");
     const btnRedo = document.getElementById("btn-redo");
@@ -690,6 +820,9 @@ class CusteboStudioApp {
             if (this.meshGeometryCache.has(mf)) {
               const gClone = this.meshGeometryCache.get(mf).clone();
               gClone.scale(mScale[0], mScale[1], mScale[2]);
+              if (p.up_axis === "Y_UP_TO_Z_UP") {
+                gClone.rotateX(Math.PI / 2);
+              }
               gClone.computeVertexNormals();
               const pm = new THREE.Mesh(gClone, partMat);
               pm.position.set(lp[0], lp[1], lp[2]);
@@ -1088,6 +1221,67 @@ class CusteboStudioApp {
     }
   }
 
+  _snapWallCornerPoint(rawPt, snapRadius = 0.45) {
+    if (!rawPt) return { pt: rawPt, snapped: false };
+    const candidates = [];
+
+    // 1. Vertices already placed in the current wall trace (allows snapping closed to start!)
+    for (const p of this.floorplanPoints || []) {
+      candidates.push([Number(p[0]), Number(p[1])]);
+    }
+
+    // 2. Endpoints of existing walls in the Scene Graph
+    const wallArchs = new Set(["wall", "wall_doorway", "wall_window", "wall_corner_l", "safety_fence", "jersey_barrier"]);
+    for (const n of this.sceneGraph?.nodes || []) {
+      if (n.visible === false || !wallArchs.has(n.archetype)) continue;
+      const pose = n.pose || [0, 0, 0, 0, 0, 0];
+      const cx = Number(pose[0] || 0);
+      const cy = Number(pose[1] || 0);
+      const yaw = Number(pose[5] || 0);
+      const scaleX = Number((n.scale || [1, 1, 1])[0] || 1);
+      const scaleY = Number((n.scale || [1, 1, 1])[1] || 1);
+
+      if (Array.isArray(n.parts) && n.parts.length > 0 && n.archetype === "wall_corner_l") {
+        const cYaw = Math.cos(yaw);
+        const sYaw = Math.sin(yaw);
+        for (const p of n.parts) {
+          const lp = p.local_pose || [0, 0, 0, 0, 0, 0];
+          const pSize = p.size || [1, 0.2, 2.5];
+          const pYaw = yaw + Number(lp[5] || 0);
+          const lx = Number(lp[0] || 0) * scaleX;
+          const ly = Number(lp[1] || 0) * scaleY;
+          const px = cx + cYaw * lx - sYaw * ly;
+          const py = cy + sYaw * lx + cYaw * ly;
+          const halfLen = 0.5 * Number(pSize[0] || 1) * scaleX;
+          candidates.push([px - halfLen * Math.cos(pYaw), py - halfLen * Math.sin(pYaw)]);
+          candidates.push([px + halfLen * Math.cos(pYaw), py + halfLen * Math.sin(pYaw)]);
+        }
+      } else {
+        const len = Number(n.archetype_params?.length ?? n.geometry?.size?.[0] ?? 4.0) * scaleX;
+        const halfLen = 0.5 * len;
+        candidates.push([cx - halfLen * Math.cos(yaw), cy - halfLen * Math.sin(yaw)]);
+        candidates.push([cx + halfLen * Math.cos(yaw), cy + halfLen * Math.sin(yaw)]);
+      }
+    }
+
+    let best = null;
+    let bestDist = snapRadius;
+    for (const c of candidates) {
+      const d = Math.hypot(c[0] - rawPt[0], c[1] - rawPt[1]);
+      if (d < bestDist) {
+        bestDist = d;
+        best = c;
+      }
+    }
+    if (best) {
+      return {
+        pt: [Number(best[0].toFixed(3)), Number(best[1].toFixed(3)), rawPt[2] || 0],
+        snapped: true,
+      };
+    }
+    return { pt: rawPt, snapped: false };
+  }
+
   _updateToolOverlay3D(cursorPt = null) {
     if (!this.toolOverlayGroup) return;
     while (this.toolOverlayGroup.children.length > 0) {
@@ -1100,6 +1294,11 @@ class CusteboStudioApp {
     // 1. INTERACTIVE 2D->3D WALL TRACER OVERLAY & LIVE POPUP STATS
     // -----------------------------------------------------------------------
     if (this.activeViewportTool === "floorplan") {
+      if (cursorPt) this._lastFloorplanCursor = cursorPt;
+      const snapRes = cursorPt ? this._snapWallCornerPoint(cursorPt) : { pt: null, snapped: false };
+      const activeCursor = snapRes.pt;
+      const isSnapped = snapRes.snapped;
+
       const h = Math.max(0.3, parseFloat(document.getElementById("fp-wall-height")?.value || "2.50"));
       const t = Math.max(0.05, parseFloat(document.getElementById("fp-wall-thick")?.value || "0.20"));
       const closed = Boolean(document.getElementById("fp-wall-closed")?.checked);
@@ -1123,25 +1322,37 @@ class CusteboStudioApp {
         this.toolOverlayGroup.add(pole);
       }
 
-      if (cursorPt) {
+      if (activeCursor) {
         const curRing = new THREE.Mesh(
-          new THREE.RingGeometry(0.12, 0.22, 24),
-          new THREE.MeshBasicMaterial({ color: 0xfacc15, side: THREE.DoubleSide })
+          new THREE.RingGeometry(isSnapped ? 0.16 : 0.12, isSnapped ? 0.28 : 0.22, 24),
+          new THREE.MeshBasicMaterial({
+            color: isSnapped ? 0x22c55e : 0xfacc15,
+            side: THREE.DoubleSide,
+          })
         );
-        curRing.position.set(cursorPt[0], cursorPt[1], 0.02);
+        curRing.position.set(activeCursor[0], activeCursor[1], 0.025);
         this.toolOverlayGroup.add(curRing);
+
+        if (isSnapped) {
+          const snapDot = new THREE.Mesh(
+            new THREE.SphereGeometry(0.11, 14, 10),
+            new THREE.MeshBasicMaterial({ color: 0x22c55e })
+          );
+          snapDot.position.set(activeCursor[0], activeCursor[1], 0.14);
+          this.toolOverlayGroup.add(snapDot);
+        }
       }
 
-      // Build committed wall segments + rubber-band segment to cursorPt
+      // Build committed wall segments + rubber-band segment to activeCursor
       const segments = [];
       for (let i = 0; i < pts.length - 1; i++) {
         segments.push({ a: pts[i], b: pts[i + 1], isLive: false });
       }
-      if (pts.length >= 1 && cursorPt) {
-        segments.push({ a: pts[pts.length - 1], b: [cursorPt[0], cursorPt[1]], isLive: true });
+      if (pts.length >= 1 && activeCursor) {
+        segments.push({ a: pts[pts.length - 1], b: [activeCursor[0], activeCursor[1]], isLive: true });
       }
       if (closed && pts.length >= 2) {
-        const lastPt = cursorPt ? [cursorPt[0], cursorPt[1]] : pts[pts.length - 1];
+        const lastPt = activeCursor ? [activeCursor[0], activeCursor[1]] : pts[pts.length - 1];
         segments.push({ a: lastPt, b: pts[0], isLive: true });
       }
 
@@ -1156,7 +1367,7 @@ class CusteboStudioApp {
 
         const wallGeom = new THREE.BoxGeometry(len, t, h);
         const wallMat = new THREE.MeshStandardMaterial({
-          color: seg.isLive ? 0xfacc15 : 0x38bdf8,
+          color: seg.isLive ? (isSnapped ? 0x22c55e : 0xfacc15) : 0x38bdf8,
           transparent: true,
           opacity: seg.isLive ? 0.35 : 0.52,
           roughness: 0.4,
@@ -1169,7 +1380,7 @@ class CusteboStudioApp {
         const edges = new THREE.EdgesGeometry(wallGeom);
         const edgeLine = new THREE.LineSegments(
           edges,
-          new THREE.LineBasicMaterial({ color: seg.isLive ? 0xfde047 : 0x7dd3fc })
+          new THREE.LineBasicMaterial({ color: seg.isLive ? (isSnapped ? 0x4ade80 : 0xfde047) : 0x7dd3fc })
         );
         edgeLine.position.copy(wallMesh.position);
         edgeLine.rotation.copy(wallMesh.rotation);
@@ -1183,13 +1394,14 @@ class CusteboStudioApp {
         countEl.textContent = `${pts.length} esquina${pts.length === 1 ? "" : "s"} marcada${pts.length === 1 ? "" : "s"} (Altura: ${h.toFixed(2)} m)`;
       }
       if (infoEl) {
-        if (pts.length >= 1 && cursorPt) {
+        const snapTag = isSnapped ? " · 🧲 Snap esquina" : "";
+        if (pts.length >= 1 && activeCursor) {
           const last = pts[pts.length - 1];
-          const segLen = Math.hypot(cursorPt[0] - last[0], cursorPt[1] - last[1]);
-          const segYaw = ((Math.atan2(cursorPt[1] - last[1], cursorPt[0] - last[0]) * 180) / Math.PI).toFixed(1);
-          infoEl.textContent = `Tramo actual: ${segLen.toFixed(2)} m · Ángulo: ${segYaw}°`;
-        } else if (cursorPt) {
-          infoEl.textContent = `Cursor en [${cursorPt[0].toFixed(2)}, ${cursorPt[1].toFixed(2)}] m — Haz clic para fijar 1ª esquina`;
+          const segLen = Math.hypot(activeCursor[0] - last[0], activeCursor[1] - last[1]);
+          const segYaw = ((Math.atan2(activeCursor[1] - last[1], activeCursor[0] - last[0]) * 180) / Math.PI).toFixed(1);
+          infoEl.textContent = `Tramo actual: ${segLen.toFixed(2)} m · Ángulo: ${segYaw}°${snapTag}`;
+        } else if (activeCursor) {
+          infoEl.textContent = `Cursor en [${activeCursor[0].toFixed(2)}, ${activeCursor[1].toFixed(2)}] m${snapTag} — Haz clic para fijar 1ª esquina`;
         }
       }
       return;
@@ -1426,11 +1638,15 @@ class CusteboStudioApp {
       }
 
       if (this.activeViewportTool === "floorplan") {
+        const snapRes = this._snapWallCornerPoint(pt);
+        const finalPt = snapRes.pt;
         this.floorplanPoints = this.floorplanPoints || [];
-        this.floorplanPoints.push([pt[0], pt[1]]);
-        this._updateToolOverlay3D(pt);
+        this.floorplanPoints.push([finalPt[0], finalPt[1]]);
+        this._updateToolOverlay3D(finalPt);
         this._setStatus(
-          `🧱 Esquina #${this.floorplanPoints.length} marcada en [${pt[0]}, ${pt[1]}] m. Pulsa '🧱 Levantar Muros (Enter)' en el popup cuando termines.`
+          `🧱 Esquina #${this.floorplanPoints.length} marcada en [${finalPt[0]}, ${finalPt[1]}] m${
+            snapRes.snapped ? " (🧲 Snap a esquina)" : ""
+          }. Pulsa '🧱 Levantar Muros (Enter)' cuando termines o Retroceso (⌫) para deshacer.`
         );
         return;
       }
@@ -2241,12 +2457,20 @@ class CusteboStudioApp {
     // PHASE 4.2: NAV2 WAYPOINT INSPECTOR CARD
     if (node.type === "waypoint") {
       const wp = node.waypoint || {};
+      const wpList = (this.sceneGraph?.nodes || []).filter((n) => n.type === "waypoint");
+      const wpIndex = wpList.findIndex((n) => n.id === node.id);
+      const isFirst = wpIndex <= 0;
+      const isLast = wpIndex === -1 || wpIndex >= wpList.length - 1;
       html += `
         <div class="insp-card">
-          <div class="insp-card-title">📍 Waypoint Nav2</div>
+          <div class="insp-card-title">📍 Waypoint Nav2 (${wpIndex >= 0 ? wpIndex + 1 : "?"} / ${wpList.length})</div>
           <div class="insp-row">
             <span class="insp-label">Espera (dwell s)</span>
             <input id="insp-wp-dwell" class="insp-input" type="number" step="0.5" min="0" value="${wp.dwell_time_s ?? 0.0}" />
+          </div>
+          <div class="create-grid" style="margin-top:6px;margin-bottom:0;">
+            <button id="insp-wp-up" class="tool-btn" ${isFirst ? "disabled" : ""} title="Mover waypoint antes en la ruta">⬆ Subir</button>
+            <button id="insp-wp-down" class="tool-btn" ${isLast ? "disabled" : ""} title="Mover waypoint después en la ruta">⬇ Bajar</button>
           </div>
         </div>
       `;
@@ -2255,12 +2479,26 @@ class CusteboStudioApp {
     // PHASE 4.3: ROBOT SPAWN INSPECTOR CARD
     if (node.type === "robot_spawn") {
       const rs = node.robot_spawn || {};
+      const curModel = rs.robot_model || "turtlebot4";
+      const knownModels = ["turtlebot4", "turtlebot3_burger", "turtlebot3_waffle", "husky", "jackal"];
+      const presetVal = knownModels.includes(curModel) ? curModel : "custom";
       html += `
         <div class="insp-card">
           <div class="insp-card-title">🤖 Spawn de Robot (ROS 2 Launch)</div>
           <div class="insp-row">
+            <span class="insp-label">Preset Robot</span>
+            <select id="insp-rs-preset" class="insp-select">
+              <option value="turtlebot4" ${presetVal === "turtlebot4" ? "selected" : ""}>TurtleBot 4</option>
+              <option value="turtlebot3_burger" ${presetVal === "turtlebot3_burger" ? "selected" : ""}>TurtleBot 3 Burger</option>
+              <option value="turtlebot3_waffle" ${presetVal === "turtlebot3_waffle" ? "selected" : ""}>TurtleBot 3 Waffle</option>
+              <option value="husky" ${presetVal === "husky" ? "selected" : ""}>Clearpath Husky</option>
+              <option value="jackal" ${presetVal === "jackal" ? "selected" : ""}>Clearpath Jackal</option>
+              <option value="custom" ${presetVal === "custom" ? "selected" : ""}>Personalizado...</option>
+            </select>
+          </div>
+          <div class="insp-row">
             <span class="insp-label">Modelo Robot</span>
-            <input id="insp-rs-model" class="insp-input" type="text" value="${rs.robot_model || "turtlebot4"}" />
+            <input id="insp-rs-model" class="insp-input" type="text" value="${curModel}" />
           </div>
           <div class="insp-row">
             <span class="insp-label">Namespace</span>
@@ -2598,6 +2836,21 @@ class CusteboStudioApp {
         node_id: node.id,
         patch: { waypoint: { dwell_time_s: Math.max(0, parseFloat(el.value || 0)) } },
       });
+    });
+    document.getElementById("insp-wp-up")?.addEventListener("click", () => {
+      this.sendCommand({ type: "move_waypoint_order", node_id: node.id, direction: -1 });
+    });
+    document.getElementById("insp-wp-down")?.addEventListener("click", () => {
+      this.sendCommand({ type: "move_waypoint_order", node_id: node.id, direction: 1 });
+    });
+    bindChange("insp-rs-preset", (el) => {
+      if (el.value !== "custom") {
+        this.sendCommand({
+          type: "update_node",
+          node_id: node.id,
+          patch: { robot_spawn: { robot_model: el.value } },
+        });
+      }
     });
     bindChange("insp-rs-model", (el) => {
       this.sendCommand({
@@ -3151,8 +3404,11 @@ class CusteboStudioApp {
     // Live SDF XML Split-View Toggle & Actions
     document.getElementById("btn-toggle-xml").addEventListener("click", (e) => {
       const panel = document.getElementById("xml-split-panel");
+      const resizerXml = document.getElementById("resizer-xml");
       panel.classList.toggle("hidden");
-      e.currentTarget.classList.toggle("active", !panel.classList.contains("hidden"));
+      const isHidden = panel.classList.contains("hidden");
+      resizerXml?.classList.toggle("hidden", isHidden);
+      e.currentTarget.classList.toggle("active", !isHidden);
       setTimeout(() => this._onResize(), 50);
     });
 
@@ -3748,6 +4004,15 @@ class CusteboStudioApp {
       this._setStatus("🚶 Peatón dinámico (<actor>) con trayectoria en bucle añadido");
     });
 
+    document.getElementById("world-physics-engine")?.addEventListener("change", (e) => {
+      const engine = e.target.value || "dart";
+      this.sendCommand({
+        type: "update_world",
+        patch: { physics: { engine } },
+      });
+      this._setStatus(`Motor de física actualizado a '${engine.toUpperCase()}'`);
+    });
+
     document.querySelectorAll(".world-plugin-chk").forEach((chk) => {
       chk.addEventListener("change", () => {
         const pluginKey = chk.getAttribute("data-plugin");
@@ -3888,8 +4153,21 @@ class CusteboStudioApp {
           e.preventDefault();
           triggerDropToGround();
           break;
-        case "delete":
         case "backspace":
+          e.preventDefault();
+          if (this.activeViewportTool === "floorplan" && (this.floorplanPoints || []).length > 0) {
+            this.floorplanPoints.pop();
+            this._updateToolOverlay3D(this._lastFloorplanCursor || null);
+            this._setStatus(`↩ Última esquina eliminada (${this.floorplanPoints.length} restantes)`);
+          } else if (this.activeViewportTool === "spline" && (this.splinePoints || []).length > 0) {
+            this.splinePoints.pop();
+            this._updateToolOverlay3D(null);
+            this._setStatus(`↩ Último punto de curva eliminado (${this.splinePoints.length} restantes)`);
+          } else {
+            deleteSelected();
+          }
+          break;
+        case "delete":
           e.preventDefault();
           deleteSelected();
           break;

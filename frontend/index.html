@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Custebo — ROS 2 &amp; Gazebo 3D World Editor</title>
-  <link rel="stylesheet" href="/css/studio.css?v=20261112c" />
+  <link rel="stylesheet" href="/css/studio.css?v=20261113b" />
   <script type="importmap">
     {
       "imports": {
@@ -95,8 +95,8 @@
   <!-- ==================== MAIN WORKSPACE ==================== -->
   <main class="workspace">
     <!-- LEFT PANEL: CREATION PALETTE & OUTLINER -->
-    <aside class="sidebar left-sidebar">
-      <section class="panel-section palette-section">
+    <aside id="left-sidebar" class="sidebar left-sidebar">
+      <section id="palette-section" class="panel-section palette-section">
         <div class="panel-header">
           <span>➕ LIBRERÍA DE ELEMENTOS (Z-UP)</span>
         </div>
@@ -322,7 +322,18 @@
             <!-- 4.4 Dynamic Actors (<actor>) & World Plugins -->
             <div style="font-weight:700;color:#38bdf8;font-size:11px;margin-top:4px;">🚶 Actores Dinámicos (&lt;actor&gt;) y Sistemas</div>
             <button id="btn-add-actor" class="create-btn" style="width:100%;margin-bottom:6px;" title="Añadir peatón u obstáculo móvil animado con trayectoria en bucle">🚶 Añadir Peatón en Ruta (&lt;actor&gt;)</button>
+            <div class="insp-row" style="margin-bottom:4px;">
+              <span class="insp-label">Motor Física:</span>
+              <select id="world-physics-engine" class="insp-select" title="Motor de física para Gazebo Classic (en Harmonic se usa el plugin Physics)">
+                <option value="dart">DART (Recomendado)</option>
+                <option value="bullet">Bullet</option>
+                <option value="ode">ODE</option>
+              </select>
+            </div>
             <div style="display:flex;flex-wrap:wrap;gap:6px;font-size:11px;color:var(--text-muted);">
+              <label><input type="checkbox" class="world-plugin-chk" data-plugin="physics" checked /> Physics</label>
+              <label><input type="checkbox" class="world-plugin-chk" data-plugin="user_commands" checked /> UserCommands</label>
+              <label><input type="checkbox" class="world-plugin-chk" data-plugin="scene_broadcaster" checked /> SceneBroadcaster</label>
               <label><input type="checkbox" class="world-plugin-chk" data-plugin="sensors" checked /> Sensors (Ogre2)</label>
               <label><input type="checkbox" class="world-plugin-chk" data-plugin="imu" /> IMU</label>
               <label><input type="checkbox" class="world-plugin-chk" data-plugin="navsat" /> NavSat GPS</label>
@@ -345,7 +356,9 @@
         </div>
       </section>
 
-      <section class="panel-section outliner-section">
+      <div id="resizer-left-top" class="resizer-h" title="Arrastrar para ajustar altura de Librería y Jerarquía"></div>
+
+      <section id="outliner-section" class="panel-section outliner-section">
         <div class="panel-header">
           <span>🌲 JERARQUÍA (Shift+Clic = Multi)</span>
           <div class="outliner-actions">
@@ -358,14 +371,18 @@
         <div id="outliner-tree" class="outliner-tree"></div>
       </section>
 
+      <div id="resizer-left-bottom" class="resizer-h" title="Arrastrar para ajustar altura de Jerarquía y Doctor Gazebo"></div>
+
       <!-- Doctor Gazebo Diagnostic Drawer -->
-      <section class="panel-section doctor-section">
+      <section id="doctor-section" class="panel-section doctor-section">
         <div class="panel-header">
           <span>🩺 DIAGNÓSTICO DOCTOR GAZEBO</span>
         </div>
         <div id="doctor-alerts-list" class="doctor-alerts-list"></div>
       </section>
     </aside>
+
+    <div id="resizer-left" class="resizer-v" title="Arrastrar para ajustar ancho del panel izquierdo"></div>
 
     <!-- CENTER: 3D VIEWPORT (ENU Z-UP) -->
     <section class="viewport-container" id="viewport-container">
@@ -486,6 +503,7 @@
     </section>
 
     <!-- OPTIONAL SPLIT-VIEW: LIVE SDF XML CODE PREVIEW -->
+    <div id="resizer-xml" class="resizer-v" title="Arrastrar para ajustar ancho de Vista SDF"></div>
     <section id="xml-split-panel" class="xml-split-panel">
       <div class="panel-header">
         <span>⚡ VISTA SDF EN TIEMPO REAL</span>
@@ -497,8 +515,10 @@
       <div id="xml-code-container" class="xml-code-container"></div>
     </section>
 
+    <div id="resizer-right" class="resizer-v" title="Arrastrar para ajustar ancho del Inspector"></div>
+
     <!-- RIGHT PANEL: PROPERTY & PHYSICS INSPECTOR -->
-    <aside class="sidebar right-sidebar">
+    <aside id="right-sidebar" class="sidebar right-sidebar">
       <div class="panel-header">
         <span>🔧 INSPECTOR DE PROPIEDADES</span>
         <label class="unit-toggle" title="Mostrar ángulos en Grados o Radianes (internamente siempre se guarda en radianes)">
@@ -513,6 +533,6 @@
     </aside>
   </main>
 
-  <script type="module" src="/js/main.js?v=20261112c"></script>
+  <script type="module" src="/js/main.js?v=20261113c"></script>
 </body>
 </html>

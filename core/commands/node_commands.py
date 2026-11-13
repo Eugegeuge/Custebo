@@ -75,6 +75,28 @@ class DeleteNodesCommand(Command):
             doc.nodes.insert(insert_at, copy.deepcopy(saved_node))
 
 
+class SwapNodesOrderCommand(Command):
+    """Swap the order of two nodes in `doc.nodes` (used for Nav2 waypoint route ordering)."""
+
+    def __init__(self, node_id_a: str, node_id_b: str, label: str = "Reorder Waypoints") -> None:
+        self.node_id_a = node_id_a
+        self.node_id_b = node_id_b
+        super().__init__(label=label)
+
+    def _swap(self, doc: SceneGraphDocument) -> None:
+        idx_a = next((i for i, n in enumerate(doc.nodes) if n.get("id") == self.node_id_a), -1)
+        idx_b = next((i for i, n in enumerate(doc.nodes) if n.get("id") == self.node_id_b), -1)
+        if idx_a != -1 and idx_b != -1 and idx_a != idx_b:
+            doc.nodes[idx_a], doc.nodes[idx_b] = doc.nodes[idx_b], doc.nodes[idx_a]
+
+    def execute(self, doc: SceneGraphDocument) -> None:
+        self._swap(doc)
+
+    def undo(self, doc: SceneGraphDocument) -> None:
+        self._swap(doc)
+
+
+
 class DuplicateNodeCommand(Command):
     """Duplicate an existing node (`Ctrl+D`) with a slight offset (+0.25m X, +0.25m Y)."""
 
@@ -461,53 +483,73 @@ class GroupNodesCommand(Command):
                         wy = my + rot[1][0] * lx + rot[1][1] * ly + rot[1][2] * lz
                         wz = mz + rot[2][0] * lx + rot[2][1] * ly + rot[2][2] * lz
                         psize = p.get("size", [1.0, 1.0, 1.0])
-                        combined_parts.append(
-                            {
-                                "name": f"{m.get('name', 'obj')}_{p.get('name', p_idx + 1)}",
-                                "shape": p.get("shape", "box"),
-                                "local_pose": [
-                                    clean_float(wx - cx, 6),
-                                    clean_float(wy - cy, 6),
-                                    clean_float(wz - cz, 6),
-                                    clean_float(mr + float(lp[3]), 6),
-                                    clean_float(mpitch + float(lp[4]), 6),
-                                    clean_float(myaw + float(lp[5]), 6),
-                                ],
-                                "size": [
-                                    clean_float(float(psize[0]) * sx, 6),
-                                    clean_float(float(psize[1]) * sy, 6),
-                                    clean_float(float(psize[2]) * sz, 6),
-                                ],
-                                "radius": clean_float(float(p.get("radius", 0.2)) * 0.5 * (sx + sy), 6),
-                                "length": clean_float(float(p.get("length", 1.0)) * sz, 6),
-                                "color": list(p.get("color", m_color)),
-                            }
-                        )
+                        part_dict: Dict[str, Any] = {
+                            "name": f"{m.get('name', 'obj')}_{p.get('name', p_idx + 1)}",
+                            "shape": p.get("shape", "box"),
+                            "local_pose": [
+                                clean_float(wx - cx, 6),
+                                clean_float(wy - cy, 6),
+                                clean_float(wz - cz, 6),
+                                clean_float(mr + float(lp[3]), 6),
+                                clean_float(mpitch + float(lp[4]), 6),
+                                clean_float(myaw + float(lp[5]), 6),
+                            ],
+                            "size": [
+                                clean_float(float(psize[0]) * sx, 6),
+                                clean_float(float(psize[1]) * sy, 6),
+                                clean_float(float(psize[2]) * sz, 6),
+                            ],
+                            "radius": clean_float(float(p.get("radius", 0.2)) * 0.5 * (sx + sy), 6),
+                            "length": clean_float(float(p.get("length", 1.0)) * sz, 6),
+                            "color": list(p.get("color", m_color)),
+                        }
+                        if p.get("shape") == "mesh" and p.get("mesh_filename"):
+                            pm_scale = p.get("mesh_scale", [1.0, 1.0, 1.0])
+                            part_dict["mesh_filename"] = p["mesh_filename"]
+                            part_dict["mesh_uri"] = p.get("mesh_uri", f"meshes/{p['mesh_filename']}")
+                            part_dict["mesh_scale"] = [
+                                clean_float(float(pm_scale[0]) * sx, 6),
+                                clean_float(float(pm_scale[1]) * sy, 6),
+                                clean_float(float(pm_scale[2]) * sz, 6),
+                            ]
+                            part_dict["up_axis"] = p.get("up_axis", "Z_UP")
+                        combined_parts.append(part_dict)
                 else:
                     geom = m.get("geometry", {})
                     gsize = geom.get("size", [1.0, 1.0, 1.0])
-                    combined_parts.append(
-                        {
-                            "name": f"{m.get('name', f'part_{m_idx + 1}')}",
-                            "shape": geom.get("shape", "box"),
-                            "local_pose": [
-                                clean_float(mx - cx, 6),
-                                clean_float(my - cy, 6),
-                                clean_float(mz - cz, 6),
-                                clean_float(mr, 6),
-                                clean_float(mpitch, 6),
-                                clean_float(myaw, 6),
-                            ],
-                            "size": [
-                                clean_float(float(gsize[0]) * sx, 6),
-                                clean_float(float(gsize[1]) * sy, 6),
-                                clean_float(float(gsize[2]) * sz, 6),
-                            ],
-                            "radius": clean_float(float(geom.get("radius", 0.5)) * 0.5 * (sx + sy), 6),
-                            "length": clean_float(float(geom.get("length", 1.0)) * sz, 6),
-                            "color": list(m_color),
-                        }
-                    )
+                    is_mesh_node = m.get("type") == "mesh" and bool(m.get("mesh", {}).get("filename"))
+                    part_dict = {
+                        "name": f"{m.get('name', f'part_{m_idx + 1}')}",
+                        "shape": "mesh" if is_mesh_node else geom.get("shape", "box"),
+                        "local_pose": [
+                            clean_float(mx - cx, 6),
+                            clean_float(my - cy, 6),
+                            clean_float(mz - cz, 6),
+                            clean_float(mr, 6),
+                            clean_float(mpitch, 6),
+                            clean_float(myaw, 6),
+                        ],
+                        "size": [
+                            clean_float(float(gsize[0]) * sx, 6),
+                            clean_float(float(gsize[1]) * sy, 6),
+                            clean_float(float(gsize[2]) * sz, 6),
+                        ],
+                        "radius": clean_float(float(geom.get("radius", 0.5)) * 0.5 * (sx + sy), 6),
+                        "length": clean_float(float(geom.get("length", 1.0)) * sz, 6),
+                        "color": list(m_color),
+                    }
+                    if is_mesh_node:
+                        minfo = m["mesh"]
+                        u_scale = float(minfo.get("unit_scale", 1.0))
+                        part_dict["mesh_filename"] = minfo["filename"]
+                        part_dict["mesh_uri"] = minfo.get("uri", f"meshes/{minfo['filename']}")
+                        part_dict["mesh_scale"] = [
+                            clean_float(u_scale * sx, 6),
+                            clean_float(u_scale * sy, 6),
+                            clean_float(u_scale * sz, 6),
+                        ]
+                        part_dict["up_axis"] = minfo.get("up_axis", "Z_UP")
+                    combined_parts.append(part_dict)
 
             first = members[0]
             all_static = all(bool(m.get("static", True)) for m in members)
@@ -543,6 +585,28 @@ class GroupNodesCommand(Command):
         for idx, saved_node in sorted(self.removed_entries, key=lambda x: x[0]):
             insert_at = min(idx, len(doc.nodes))
             doc.nodes.insert(insert_at, copy.deepcopy(saved_node))
+
+
+class SwapNodesOrderCommand(Command):
+    """Swap the order of two nodes in `doc.nodes` (used for Nav2 waypoint route ordering)."""
+
+    def __init__(self, node_id_a: str, node_id_b: str, label: str = "Reorder Waypoints") -> None:
+        self.node_id_a = node_id_a
+        self.node_id_b = node_id_b
+        super().__init__(label=label)
+
+    def _swap(self, doc: SceneGraphDocument) -> None:
+        idx_a = next((i for i, n in enumerate(doc.nodes) if n.get("id") == self.node_id_a), -1)
+        idx_b = next((i for i, n in enumerate(doc.nodes) if n.get("id") == self.node_id_b), -1)
+        if idx_a != -1 and idx_b != -1 and idx_a != idx_b:
+            doc.nodes[idx_a], doc.nodes[idx_b] = doc.nodes[idx_b], doc.nodes[idx_a]
+
+    def execute(self, doc: SceneGraphDocument) -> None:
+        self._swap(doc)
+
+    def undo(self, doc: SceneGraphDocument) -> None:
+        self._swap(doc)
+
 
 
 

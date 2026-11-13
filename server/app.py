@@ -43,6 +43,7 @@ from core.commands import (
     DuplicateNodesCommand,
     ExplodeCompositeCommand,
     GroupNodesCommand,
+    SwapNodesOrderCommand,
     UpdateNodeCommand,
     UpdateWorldSettingsCommand,
 )
@@ -809,6 +810,22 @@ class CusteboRequestHandler(SimpleHTTPRequestHandler):
         elif cmd_type == "update_world":
             patch = dict(body.get("patch", {}))
             SESSION.manager.execute(UpdateWorldSettingsCommand(patch))
+
+        elif cmd_type == "move_waypoint_order":
+            node_id = str(body.get("node_id", ""))
+            direction = int(body.get("direction", -1))
+            wp_ids = [n.get("id") for n in SESSION.manager.doc.nodes if n.get("type") == "waypoint"]
+            if node_id in wp_ids:
+                pos = wp_ids.index(node_id)
+                target_pos = pos + (-1 if direction < 0 else 1)
+                if 0 <= target_pos < len(wp_ids):
+                    SESSION.manager.execute(
+                        SwapNodesOrderCommand(
+                            wp_ids[pos],
+                            wp_ids[target_pos],
+                            label=f"Reorder Waypoint '{node_id}'",
+                        )
+                    )
 
         elif cmd_type == "add_folder":
             folder_name = str(body.get("name", "New Folder")).strip() or "New Folder"
